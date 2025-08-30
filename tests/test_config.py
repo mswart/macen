@@ -1,9 +1,11 @@
 import io
-import socket
+from pathlib import Path
+from typing import cast
 
+import pydantic
 import pytest
 
-from acmems import config, storages
+from acmems import challenges, config, storages
 
 
 def parse(configcontent: str) -> config.Configurator:
@@ -18,6 +20,7 @@ def test_error_on_option_without_section() -> None:
         parse("""
             acme-server = https://acme.example.org/directory
             [account]
+            dir = /tmp/dir
             [mgmt]
             """)
     assert "acme-server" in str(w[-1].message)
@@ -27,6 +30,7 @@ def test_error_on_option_without_section() -> None:
 def test_comment() -> None:
     parse("""
         [account]
+        dir = /tmp/dir
         #acme-server https://acme.example.org/directory
         [mgmt]
         """)
@@ -38,28 +42,30 @@ def test_comment() -> None:
 def test_acme_server_address() -> None:
     c = parse("""
 [account]
+dir = /tmp/dir
 acme-server = https://acme.example.org/directory
 [mgmt]
 """)
-    assert c.acme_server == "https://acme.example.org/directory"
+    assert c.account.acme_server == "https://acme.example.org/directory"
 
 
 def test_default_acme_server_address() -> None:
     c = parse("""[account]
+        dir=/tmp/test
         [mgmt]""")
-    assert c.acme_server == "https://acme-staging-v02.api.letsencrypt.org/directory"
+    assert c.account.acme_server == "https://acme-staging-v02.api.letsencrypt.org/directory"
 
 
 def test_error_on_multiple_acme_server_addresses() -> None:
-    with pytest.raises(config.SingletonOptionRedifined) as e:
+    with pytest.raises(pydantic.ValidationError) as e:
         parse("""
             [account]
+            dir = /tmp/dir
             acme-server = https://acme.example.org/directory
             acme-server = https://acme2.example.org/directory
             [mgmt]
             """)
-    assert "https://acme.example.org/directory" in str(e.value)
-    assert "https://acme2.example.org/directory" in str(e.value)
+    assert "acme-server" in str(e.value)
 
 
 ### [account] dir
@@ -71,7 +77,20 @@ def test_account_dir() -> None:
         dir = /tmp/test
         [mgmt]
         """)
-    assert config.account_dir == "/tmp/test"  # noqa: S108
+    assert config.account.dir == Path("/tmp/test")  # noqa: S108
+
+
+### [account] accept terms of service
+
+
+def test_tos() -> None:
+    config = parse("""
+        [account]
+        dir = /tmp/test
+        accept-terms-of-service = yes
+        [mgmt]
+        """)
+    assert config.account.accept_terms_of_service is True
 
 
 ### [account] unknown option
@@ -81,6 +100,7 @@ def test_warning_on_unknown_account_option() -> None:
     with pytest.warns(config.UnusedOptionWarning) as w:
         parse("""
             [account]
+            dir = /tmp/dir
             acme_server = https://acme.example.org/directory
             [mgmt]
             """)
@@ -94,56 +114,22 @@ def test_warning_on_unknown_account_option() -> None:
 def test_simple_mgmt_listener() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         acme-server = https://acme.example.org/directory
         [mgmt]
         listener=127.0.0.1:13
         listener=[fe80::abba:abba%lo]:1380
         """)
-    assert len(config.mgmt_listeners) == 2
-    listeners = config.mgmt_listeners
-    assert listeners[0][0] is socket.AF_INET
-    assert listeners[0][4][0] == "127.0.0.1"
-    assert listeners[0][4][1] == 13
-    assert listeners[1][0] is socket.AF_INET6
-    # Since Python 3.7, the interface name is removed as the interface number
-    # is stored as fourth value in the tuple
-    assert listeners[1][4][0] in ["fe80::abba:abba%lo", "fe80::abba:abba"]
-    assert listeners[1][4][1] == 1380
-    assert listeners[1][4][3] == socket.if_nametoindex("lo")  # pyright: ignore[reportGeneralTypeIssues] (we parse a link local address and have more fields)
+    assert config.mgmt.listeners == ["127.0.0.1:13", "[fe80::abba:abba%lo]:1380"]
 
 
 def test_default_mgmt_listener() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         [mgmt]
         """)
-    assert len(config.mgmt_listeners) == 2
-    listeners = config.mgmt_listeners
-    assert listeners[0][0] is socket.AF_INET
-    assert listeners[0][4][0] == "127.0.0.1"
-    assert listeners[0][4][1] == 1313
-    assert listeners[1][0] is socket.AF_INET6
-    assert listeners[1][4][0] == "::1"
-    assert listeners[1][4][1] == 1313
-
-
-def test_disable_mgmt_listener() -> None:
-    config = parse("""
-        [account]
-        [mgmt]
-        listener=
-        """)
-    assert len(config.mgmt_listeners) == 0
-
-
-def test_unix_socket_as_mgmt_listener() -> None:
-    with pytest.raises(config.ConfigurationError) as e:
-        parse("""
-            [account]
-            [mgmt]
-            listener=/run/acmems/mgmt.sock
-            """)
-    assert "unix socket" in str(e.value)
+    assert config.mgmt.listeners == ["127.0.0.1:1313", "[::1]:1313"]
 
 
 ### [mgmt] max size
@@ -152,36 +138,40 @@ def test_unix_socket_as_mgmt_listener() -> None:
 def test_default_max_size_options() -> None:
     p = parse("""
         [account]
+        dir = /tmp/dir
         [mgmt]
         """)
-    assert p.max_size == 4096
+    assert p.mgmt.max_size == 4096
 
 
 def test_max_size_options_in_bytes() -> None:
     p = parse("""
         [account]
+        dir = /tmp/dir
         [mgmt]
         max-size = 2394
         """)
-    assert p.max_size == 2394
+    assert p.mgmt.max_size == 2394
 
 
 def test_max_size_options_in_kbytes() -> None:
     p = parse("""
         [account]
+        dir = /tmp/dir
         [mgmt]
         max-size = 4k
         """)
-    assert p.max_size == 4096
+    assert p.mgmt.max_size == 4000
 
 
 def test_max_size_options_in_mbytes() -> None:
     p = parse("""
         [account]
+        dir = /tmp/dir
         [mgmt]
         max-size = 1m
         """)
-    assert p.max_size == 1024 * 1024
+    assert p.mgmt.max_size == 1_000_000
 
 
 ### [mgmt] unknown option
@@ -191,6 +181,7 @@ def test_warning_on_unknown_mgmt_option() -> None:
     with pytest.warns(config.UnusedOptionWarning) as w:
         parse("""
             [account]
+            dir = /tmp/dir
             [mgmt]
             manager = https://acme.example.org/directory
             """)
@@ -205,6 +196,7 @@ def test_warning_on_unknown_section() -> None:
     with pytest.warns(config.UnusedSectionWarning) as w:
         parse("""
             [account]
+            dir = /tmp/dir
             [mgmt]
             [unknown]
             """)
@@ -217,6 +209,7 @@ def test_warning_on_unknown_section() -> None:
 def test_simple_http_listener() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         acme-server = https://acme.example.org/directory
         [mgmt]
         default-verification=http
@@ -226,27 +219,8 @@ def test_simple_http_listener() -> None:
         listener=[::]:80
         """)
     assert tuple(config.validators.keys()) == ("http",)
-    assert len(config.validators["http"].listeners) == 2
-    listeners = config.validators["http"].listeners
-    assert listeners[0][0] is socket.AF_INET
-    assert listeners[0][4][0] == "127.0.0.1"
-    assert listeners[0][4][1] == 80
-    assert listeners[1][0] is socket.AF_INET6
-    assert listeners[1][4][0] == "::"
-    assert listeners[1][4][1] == 80
-
-
-def test_unix_socket_as_http_listener() -> None:
-    with pytest.raises(config.ConfigurationError) as e:
-        parse("""
-            [account]
-            [mgmt]
-            default-verification=http
-            [verification "http"]
-            type=http01
-            listener=/run/acmems/http.sock
-            """)
-    assert "unix socket" in str(e.value)
+    http = cast(challenges.HttpChallengeImplementor, config.validators["http"])
+    assert http.config.listeners == ["127.0.0.1:80", "[::]:80"]
 
 
 ### dns verification
@@ -255,6 +229,7 @@ def test_unix_socket_as_http_listener() -> None:
 def test_dns01_listener_default_options() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         acme-server = https://acme.example.org/directory
         [mgmt]
         default-verification=dns
@@ -263,14 +238,16 @@ def test_dns01_listener_default_options() -> None:
         """)
     assert tuple(config.validators.keys()) == ("dns",)
     v = config.validators["dns"]
-    assert v.dns_servers == ["127.0.0.1"]
-    assert v.timeout == 5
-    assert v.ttl == 60
+    v = cast(challenges.DnsChallengeDnsUpdateImplementor, config.validators["dns"])
+    assert v.config.dns_server == "127.0.0.1"
+    assert v.config.timeout == 5
+    assert v.config.ttl == 60
 
 
 def test_dns01_listener_with_explicit_options() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         acme-server = https://acme.example.org/directory
         [mgmt]
         default-verification=
@@ -281,10 +258,10 @@ def test_dns01_listener_with_explicit_options() -> None:
         ttl = 61
         """)
     assert tuple(config.validators.keys()) == ("dns",)
-    v = config.validators["dns"]
-    assert v.dns_servers == ["127.0.0.2"]
-    assert v.timeout == 6
-    assert v.ttl == 61
+    v = cast(challenges.DnsChallengeDnsUpdateImplementor, config.validators["dns"])
+    assert v.config.dns_server == "127.0.0.2"
+    assert v.config.timeout == 6
+    assert v.config.ttl == 61
 
 
 #### default verification
@@ -293,22 +270,18 @@ def test_dns01_listener_with_explicit_options() -> None:
 def test_default_http_listener() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         [mgmt]
         """)
     assert tuple(config.validators.keys()) == ("http",)
-    assert len(config.validators["http"].listeners) == 2
-    listeners = config.validators["http"].listeners
-    assert listeners[0][0] is socket.AF_INET
-    assert listeners[0][4][0] == "0.0.0.0"  # noqa: S104
-    assert listeners[0][4][1] == 1380
-    assert listeners[1][0] is socket.AF_INET6
-    assert listeners[1][4][0] == "::"
-    assert listeners[1][4][1] == 1380
+    validator = cast(challenges.HttpChallengeImplementor, config.validators["http"])
+    assert validator.config.listeners == ["0.0.0.0:1380", "[::]:1380"]
 
 
 def test_disable_http_listener() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         [mgmt]
         default-verification=
         """)
@@ -318,6 +291,7 @@ def test_disable_http_listener() -> None:
 def test_use_single_verification_as_default() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         [mgmt]
         [verification "http234"]
         type = http01
@@ -332,6 +306,7 @@ def test_use_single_verification_as_default() -> None:
 def test_explict_none_storage() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         acme-server = https://acme.example.org/directory
         [mgmt]
         default-storage = ntest
@@ -343,9 +318,10 @@ def test_explict_none_storage() -> None:
 
 
 def test_not_other_none_storage_options() -> None:
-    with pytest.raises(config.ConfigurationError) as e:
+    with pytest.warns(config.UnusedOptionWarning):
         parse("""
             [account]
+            dir = /tmp/dir
             acme-server = https://acme.example.org/directory
             [mgmt]
             default-storage = ntest
@@ -353,12 +329,12 @@ def test_not_other_none_storage_options() -> None:
             type = none
             other = test
             """)
-    assert "other" in str(e.value)
 
 
 def test_implicit_default_storage() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         acme-server = https://acme.example.org/directory
         [mgmt]
         """)
@@ -368,6 +344,7 @@ def test_implicit_default_storage() -> None:
 def test_use_single_stroage_as_default() -> None:
     config = parse("""
         [account]
+        dir = /tmp/dir
         [mgmt]
         [storage "io"]
         type = file

@@ -60,7 +60,8 @@ class Authenticator:
 
 
 class Method(Protocol):
-    option_names: tuple[str]
+    @staticmethod
+    def option_names() -> tuple[str, ...]: ...
 
     def possible(self, processor: "Processor") -> bool: ...
     def check(self, processor: "Processor") -> bool: ...
@@ -70,7 +71,9 @@ class Method(Protocol):
 class IPAuthMethod:
     """Autentication by source IP"""
 
-    option_names = ("ip",)
+    @staticmethod
+    def option_names() -> tuple[str, ...]:
+        return ("ip",)
 
     def __init__(self, ips: list[IP] | None = None) -> None:
         self.ips = ips or []
@@ -93,7 +96,9 @@ class IPAuthMethod:
 class HmacAuthMethod:
     """Authentication by HMAC / secret key"""
 
-    option_names = ("hmac_type", "hmac_key")
+    @staticmethod
+    def option_names() -> tuple[str, ...]:
+        return ("hmac_type", "hmac_key")
 
     def parse(self, option: str, value: str) -> None:
         if option == "hmac_type":
@@ -134,7 +139,9 @@ class HmacAuthMethod:
 class AllAuthMethod:
     """Allow all authentication"""
 
-    option_names = ("all",)
+    @staticmethod
+    def option_names() -> tuple[str, ...]:
+        return ("all",)
 
     def parse(self, option: str, value: str) -> None:
         assert option == "all"
@@ -212,12 +219,12 @@ class Block:
                     ) from None
                 continue
             for method in self.methods:
-                if option in method.option_names:
+                if option in method.option_names():
                     method.parse(option, value)
                     break
             else:  # no known method processes this option
                 for method in unused_methods:
-                    if option in method.option_names:
+                    if option in method.option_names():
                         break
                 else:
                     from acmems.config import UnusedOptionWarning
@@ -319,8 +326,10 @@ class Processor:
 
     def read_and_parse_csr(self) -> None:
         content_length = int(self.headers["Content-Length"])
-        if self.auth.config and content_length > self.auth.config.max_size:
-            raise exceptions.PayloadToLarge(size=content_length, allowed=self.auth.config.max_size)
+        if self.auth.config and content_length > self.auth.config.mgmt.max_size:
+            raise exceptions.PayloadToLarge(
+                size=content_length, allowed=int(self.auth.config.mgmt.max_size)
+            )
         self.csrpem = self.rfile.read(content_length)
         self.csr = x509.load_pem_x509_csr(self.csrpem)
         self.common_name = self.csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value

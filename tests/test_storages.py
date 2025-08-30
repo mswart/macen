@@ -3,9 +3,10 @@ from pathlib import Path
 from typing import cast
 
 from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPrivateKeyTypes
+import pydantic
 import pytest
 
-from acmems import config, storages
+from acmems import storages
 
 from .helpers import gencsrpem, signcsr
 
@@ -22,14 +23,9 @@ def file_storage(tmp_path: Path) -> storages.FileStorageImplementor:
 
 class TestFileStorage:
     def test_error_without_directory(self) -> None:
-        with pytest.raises(config.ConfigurationError) as e:
+        with pytest.raises(pydantic.ValidationError) as e:
             storages.setup("file", "file", ())
         assert "directory" in str(e.value)
-
-    def test_error_on_unknown_option(self, tmp_path: Path) -> None:
-        with pytest.raises(config.ConfigurationError) as e:
-            storages.setup("file", "file", (("directory", str(tmp_path)), ("unknonw", "value")))
-        assert "unknonw" in str(e.value)
 
     def test_none_on_unknown_csr(
         self, file_storage: storages.FileStorageImplementor, ckey: CertificateIssuerPrivateKeyTypes

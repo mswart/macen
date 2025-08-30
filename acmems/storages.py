@@ -3,8 +3,11 @@ from datetime import datetime, timedelta
 from hashlib import sha384
 import os
 import os.path
+from pathlib import Path
 import sys
 from typing import Sequence
+
+import pydantic
 
 if sys.version_info >= (3, 11):
     from datetime import UTC
@@ -16,14 +19,16 @@ else:
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 
-from acmems.config import ConfigurationError
+from acmems.config import ConfigurationError, Configurator, default_config
 
 
 class StorageImplementor:
-    def __init__(self, type: str, name: str, options: Sequence[tuple[str, str]]) -> None:
-        self.type = type
+    class Config(pydantic.BaseModel):
+        model_config = default_config.copy()
+
+    def __init__(self, name: str, options: Sequence[tuple[str, str]]) -> None:
         self.name = name
-        self.parse(options)
+        self.config = Configurator.parse_group(self.Config, options)
 
     @abstractmethod
     def parse(self, options: Sequence[tuple[str, str]]) -> None: ...
@@ -36,14 +41,6 @@ class StorageImplementor:
 
 
 class NoneStorageImplementor(StorageImplementor):
-    def parse(self, options: Sequence[tuple[str, str]]) -> None:
-        if len(options) > 0:
-            raise ConfigurationError(
-                'none storage does not support any options, but found "{}"'.format(
-                    '", "'.join(o[0] for o in options)
-                )
-            )
-
     def from_cache(self, csr: bytes) -> str | None:
         return None
 
@@ -52,39 +49,29 @@ class NoneStorageImplementor(StorageImplementor):
 
 
 class FileStorageImplementor(StorageImplementor):
-    def parse(self, options: Sequence[tuple[str, str]]) -> None:
-        directory: str | None = None
-        renew_within = None
-        for option, value in options:
-            if option == "directory":
-                directory = value
-            elif option == "renew-within":
-                renew_within = timedelta(days=int(value))
-            else:
-                raise ConfigurationError('FileStorage: unknown option "{}"'.format(option))
-        if directory is None:
-            raise ConfigurationError("FileStorage: option directory is required")
-        else:
-            self.directory = directory
-        self.renew_within = renew_within or timedelta(days=14)
+    class Config(StorageImplementor.Config):
+        directory: Path
+        renew_within: int = 14
 
-    def cache_dir(self, csr: bytes) -> str:
+    config: Config
+
+    def cache_dir(self, csr: bytes) -> Path:
         hash = sha384(csr).hexdigest()
-        return os.path.join(self.directory, hash[0:2], hash[2:])
+        return self.config.directory / hash[0:2] / hash[2:]
 
     def from_cache(self, csr: bytes) -> str | None:
         dir = self.cache_dir(csr)
-        if not os.path.isfile(os.path.join(dir, "csr.pem")):
+        if not dir.joinpath("csr.pem").is_file():
             return None
-        if not os.path.isfile(os.path.join(dir, "cert.pem")):
+        if not dir.joinpath("cert.pem").is_file():
             return None
-        if csr != open(os.path.join(dir, "csr.pem"), "rb").read():
+        if csr != dir.joinpath("csr.pem").read_bytes():
             # should not happen!!
             return None
-        certpem = open(os.path.join(dir, "cert.pem"), "rb").read()
+        certpem = dir.joinpath("cert.pem").read_bytes()
         cert = x509.load_pem_x509_certificate(certpem, default_backend())
         current_validation_time = cert.not_valid_after_utc - datetime.now(tz=UTC)
-        if current_validation_time < self.renew_within:
+        if current_validation_time < timedelta(days=self.config.renew_within):
             return None
         else:
             return certpem.decode("utf-8")
@@ -107,6 +94,6 @@ implementors: dict[str, type[StorageImplementor]] = {
 
 def setup(type: str, name: str, options: Sequence[tuple[str, str]]) -> StorageImplementor:
     try:
-        return implementors[type](type, name, options)
+        return implementors[type](name, options)
     except KeyError:
         raise ConfigurationError('Unsupported storage type "{}"'.format(type)) from None
