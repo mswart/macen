@@ -106,7 +106,7 @@ class ACMEManager:
         key = rsa.generate_private_key(
             public_exponent=65537, key_size=key_size, backend=default_backend()
         )
-        os.makedirs(self.config.account_dir, exist_ok=True)
+        self.config.account.dir.mkdir(parents=True, exist_ok=True)
         with open(self.config.keyfile, "wb") as f:
             f.write(
                 key.private_bytes(
@@ -122,14 +122,16 @@ class ACMEManager:
     def directory(self) -> acme.messages.Directory:
         return acme.messages.Directory.from_json(
             acme.client.ClientNetwork(None, verify_ssl=os.getenv("ACME_CAFILE", True))
-            .get(self.config.acme_server)
+            .get(self.config.account.acme_server)
             .json()
         )
 
     def init_client(self) -> None:
         """create ACME client"""
         net = acme.client.ClientNetwork(self.key, verify_ssl=os.getenv("ACME_CAFILE", True))
-        directory = acme.messages.Directory.from_json(net.get(self.config.acme_server).json())
+        directory = acme.messages.Directory.from_json(
+            net.get(self.config.account.acme_server).json()
+        )
         self.client = acme.client.ClientV2(directory, net)
 
     def register(
@@ -137,7 +139,7 @@ class ACMEManager:
         emails: list[str] | None = None,
         tos_agreement: list[str] | bool | str | None = None,
     ) -> None:
-        agreed_tos = tos_agreement or self.config.accept_terms_of_service
+        agreed_tos = tos_agreement or self.config.account.accept_terms_of_service
         if agreed_tos is True:
             tos_accepted = True
         elif isinstance(agreed_tos, str):

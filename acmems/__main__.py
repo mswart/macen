@@ -3,7 +3,7 @@ import argparse
 import importlib.metadata
 from threading import Thread
 
-from .config import Configurator
+from .config import Configurator, iter_addrinfo
 from .manager import ACMEManager
 from .server import ACMEAbstractHandler, ACMEMgmtHandler, ThreadedACMEServerByType
 
@@ -39,7 +39,7 @@ def main() -> None:
     mgmt_services: list[Thread] = []
     mgmt_threads: list[Thread] = []
 
-    for mgmt_listen in config.mgmt_listeners:
+    for mgmt_listen in iter_addrinfo(config.mgmt.listeners):
         mgmt_service = ThreadedACMEServerByType[mgmt_listen[0]](mgmt_listen[4], ACMEMgmtHandler)
         mgmt_services.append(mgmt_service)
         thread = Thread(

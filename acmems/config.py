@@ -7,17 +7,20 @@ The parsed configuration is stored as instance variables and referenced
 options are directly instanciated.
 """
 
+from collections.abc import Generator
 import importlib
 import io
 import logging
 import logging.config
 import logging.handlers
-import os.path
+from pathlib import Path
 import re
 import socket
 import sys
-from typing import TYPE_CHECKING, Any, Literal, Sequence
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Sequence, TypeVar
 import warnings
+
+import pydantic
 
 from acmems.auth import Authenticator
 
@@ -79,39 +82,70 @@ class UnusedSectionWarning(ConfigurationWarning):
     pass
 
 
+# Default config that should be used by all pydantic based config sections.
+default_config: pydantic.ConfigDict = pydantic.ConfigDict(
+    alias_generator=lambda n: n.replace("_", "-"), extra="allow"
+)
+
+
+def extract_bool(value: str | Any) -> bool | str | Any:  # noqa: ANN401
+    if value in ("false", "no"):
+        return False
+    if value in ("true", "yes"):
+        return True
+    return value
+
+
+class AccountConfig(pydantic.BaseModel):
+    model_config = default_config.copy()
+
+    acme_server: str = "https://acme-staging-v02.api.letsencrypt.org/directory"
+    accept_terms_of_service: Annotated[
+        bool | str | list[str], pydantic.AfterValidator(extract_bool)
+    ] = False
+    dir: Path
+
+
+class MgmtConfig(pydantic.BaseModel):
+    model_config = default_config.copy()
+
+    max_size: pydantic.ByteSize = pydantic.ByteSize(4096)
+    default_verification: Literal[False] | str | None = None
+    default_storage: str | Literal[False] | None = None
+    listeners: list[str] | str = pydantic.Field(
+        default=["127.0.0.1:1313", "[::1]:1313"], alias="listener"
+    )
+
+
+T = TypeVar("T", bound=pydantic.BaseModel)
+
+
 class Configurator:
     def __init__(self, *configs: io.TextIOBase) -> None:
         self.validators: "dict[str, ChallengeImplementor]" = {}
         self.default_validator: "ChallengeImplementor | None" = None
-        self.default_validator_name: str | Literal[False] | None = None
         self.storages: "dict[str, StorageImplementor]" = {}
         self.default_storage: "StorageImplementor | None" = None
-        self.default_storage_name: str | Literal[False] | None = None
-        self.accept_terms_of_service: Literal[True] | list[str] | None = None
-        self._max_size = None
+        self.mgmt = MgmtConfig()
 
         self.auth = Authenticator(self)
         for config in configs:
             self.parse(config)
 
     @property
-    def keyfile(self) -> str:
-        return os.path.join(self.account_dir, "account.pem")
+    def keyfile(self) -> Path:
+        return self.account.dir / "account.pem"
 
     @property
-    def registration_file(self) -> str:
-        return os.path.join(self.account_dir, "registration.json")
-
-    @property
-    def max_size(self) -> int:
-        return self._max_size or 4096
+    def registration_file(self) -> Path:
+        return self.account.dir / "registration.json"
 
     def parse(self, config: io.TextIOBase) -> None:
         parsed_config = self.read_data(config)
         self.parse_setup_config(parsed_config.pop("setup", []))
         self.parse_logging_config(parsed_config.pop("logging", []))
-        self.parse_account_config(parsed_config.pop("account", []))
-        self.parser_mgmt_config(parsed_config.pop("mgmt", []))
+        self.account = self.parse_group(AccountConfig, parsed_config.pop("account", []))
+        self.mgmt = self.parse_group(MgmtConfig, parsed_config.pop("mgmt", []))
         special_group_re = re.compile(
             '^(?P<type>(auth|verification|storage)) (?P<opener>"?)(?P<name>.+)(?P=opener)$'
         )
@@ -138,15 +172,32 @@ class Configurator:
             self.auth.parse_block(name, options)
 
     @staticmethod
+    def parse_group(model: type[T], options: Sequence[tuple[str, Any]]) -> T:
+        aggregated: dict[str, list[Any] | Any] = {}
+        for key, value in options:
+            if key in aggregated:
+                if not isinstance(aggregated[key], list):
+                    aggregated[key] = [aggregated[key]]
+                aggregated[key].append(value)
+            elif not value.strip():
+                aggregated[key] = False
+            else:
+                aggregated[key] = value
+        parsed = model.model_validate(aggregated)
+        if parsed.model_extra:
+            warnings.warn(
+                f"{model.__name__}: Ignore extra options {parsed.model_extra}",
+                UnusedOptionWarning,
+                stacklevel=2,
+            )
+        return parsed
+
+    @staticmethod
     def read_data(config: io.TextIOBase) -> dict[str, list[tuple[str, str]]]:
         """Reads the given file name. It assumes that the file has a INI file
         syntax. The parser returns the data without comments and fill
         characters. It supports multiple option with the same name per
-        section but not multiple sections with the same name.
-
-        :param str filename: path to INI file
-        :return: a dictionary - the key is the section name value, the
-            option is a array of (option name, option value) tuples"""
+        section but not multiple sections with the same name."""
         sections: dict[str, list[tuple[str, str]]] = {}
         with config as f:
             section: str | None = None
@@ -243,84 +294,6 @@ class Configurator:
                 opts["format"] = format
             logging.basicConfig(level=level or "WARNING", **opts)
 
-    def parse_account_config(self, config: Sequence[tuple[str, str]]) -> None:
-        acme_server = None
-        for option, value in config:
-            if option == "acme-server":
-                if acme_server is not None:
-                    raise SingletonOptionRedifined(
-                        section="account", option="acme_server", old=acme_server, new=value
-                    )
-                acme_server = value
-            elif option == "dir":
-                self.account_dir = value
-            elif option == "accept-terms-of-service":
-                if value.lower() in ("true", "yes"):
-                    if self.accept_terms_of_service:
-                        raise ConfigurationError(
-                            "Either accept terms of services fully (yes) or specifies urls to accept"
-                        )
-                    self.accept_terms_of_service = True
-                else:
-                    if self.accept_terms_of_service is True:
-                        raise ConfigurationError(
-                            "Either accept terms of services fully (yes) or specifies urls to accept"
-                        )
-                    elif isinstance(self.accept_terms_of_service, list):
-                        self.accept_terms_of_service.append(value)
-                    else:
-                        self.accept_terms_of_service = [value]
-            else:
-                warnings.warn(
-                    "Option unknown [{}]{} = {}".format("account", option, value),
-                    UnusedOptionWarning,
-                    stacklevel=2,
-                )
-        self.acme_server = acme_server or "https://acme-staging-v02.api.letsencrypt.org/directory"
-
-    def parser_mgmt_config(self, config: Sequence[tuple[str, str]]) -> None:
-        self.mgmt_listeners: list[ListenerInfo] = []
-        listener_configured = False
-        for option, value in config:
-            if option == "max-size":
-                suffixes = {"k": 1024, "m": 1024 * 1024}
-                for suffix, mul in suffixes.items():
-                    if value.endswith(suffix):
-                        self._max_size = int(value[: len(suffix)]) * mul
-                        break
-                else:
-                    self._max_size = int(value)
-            elif option == "default-verification":
-                if value == "":
-                    self.default_validator_name = False
-                else:
-                    self.default_validator_name = value.strip()
-            elif option == "default-storage":
-                if value == "":
-                    self.default_storage_name = False
-                else:
-                    self.default_storage_name = value.strip()
-            elif option == "listener":
-                listener_configured = True
-                if value == "":  # disable listener
-                    continue
-                if ":" not in value:
-                    raise ConfigurationError("unix socket are currenlty not supported as listeners")
-                host, port = value.rsplit(":", 1)
-                if host[0] == "[" and host[-1] == "]":
-                    host = host[1:-1]
-                self.mgmt_listeners += socket.getaddrinfo(host, int(port), proto=socket.IPPROTO_TCP)
-            else:
-                warnings.warn(
-                    "Option unknown [{}]{} = {}".format("listeners", option, value),
-                    UnusedOptionWarning,
-                    stacklevel=2,
-                )
-        if not listener_configured and self.mgmt_listeners == []:
-            self.mgmt_listeners = socket.getaddrinfo(
-                "127.0.0.1", 1313, proto=socket.IPPROTO_TCP
-            ) + socket.getaddrinfo("::1", 1313, proto=socket.IPPROTO_TCP)
-
     def parse_verification_group(self, name: str, options: list[tuple[str, str]]) -> None:
         option, value = options.pop(0)
         if option != "type":
@@ -330,11 +303,11 @@ class Configurator:
         self.validators[name] = setup(value, name, options)
 
     def setup_default_validator(self) -> None:
-        if self.default_validator_name is False:  # default validator disabled
+        if self.mgmt.default_verification is False:  # default validator disabled
             self.default_validator = None
             return
-        if self.default_validator_name:  # defined
-            self.default_validator = self.validators[self.default_validator_name]
+        if self.mgmt.default_verification:  # defined
+            self.default_validator = self.validators[self.mgmt.default_verification]
             return
         if len(self.validators) == 1:  # we use the only defined validator as default
             self.default_validator = next(iter(self.validators.values()))
@@ -352,14 +325,25 @@ class Configurator:
         self.storages[name] = setup(value, name, options)
 
     def setup_default_storage(self) -> None:
-        if self.default_storage_name is False:  # default storage disabled
+        if self.mgmt.default_storage is False:  # default storage disabled
             self.default_storage = None
             return
-        if self.default_storage_name:
-            self.default_storage = self.storages[self.default_storage_name]
+        if self.mgmt.default_storage:
+            self.default_storage = self.storages[self.mgmt.default_storage]
         if len(self.storages) == 1:
             self.default_storage = next(iter(self.storages.values()))
         else:
             from acmems.storages import setup
 
             self.default_storage = self.storages["none"] = setup("none", "none", [])
+
+
+def iter_addrinfo(listeners: str | list[str]) -> Generator[ListenerInfo, None, None]:
+    if isinstance(listeners, str):
+        listeners = [listeners]
+    for listener in listeners:
+        host, port = listener.rsplit(":", 1)
+        if host[0] == "[" and host[-1] == "]":
+            host = host[1:-1]
+        for info in socket.getaddrinfo(host, int(port), proto=socket.IPPROTO_TCP):
+            yield info

@@ -3,7 +3,12 @@ name = "acme-mgmtserver"
 version = "0.5.0a1"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
-dependencies = ["acme>=0.21.0", "josepy", "IPy"]
+dependencies = [
+    "acme>=0.21.0",
+    "josepy",
+    "IPy",
+    "pydantic>=2.11.7",
+]
 description = "Basic Python Server to execute ACME on behalf of dumb clients"
 readme = "README.md"
 authors = [{ name = "Malte Swart", email = "mswart@devtation.de" }]

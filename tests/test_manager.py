@@ -80,13 +80,15 @@ def test_register_with_general_tos(backend: ACMEBackend, tmp_path: Path) -> None
         f"""[account]
         dir = {tmp_path}
         acme-server = {backend.endpoint}
+        accept-terms-of-service = yes
         [mgmt]"""
     )
     m.create_private_key()
     m.init_client()
+    assert m.config.account.accept_terms_of_service is True
     tos_agreement = m.tos_agreement_required()
     assert tos_agreement and tos_agreement.startswith(backend.tos_prefix)
-    m.register(emails=[randomized_email()], tos_agreement=True)
+    m.register(emails=[randomized_email()])
     assert not m.tos_agreement_required()
 
 
