@@ -1,10 +1,10 @@
-ACME Management Server (ACMEMS)
-===============================
+Macen (Previously ACME Management Server (ACMEMS)
+=================================================
 
-[![Build Status](https://github.com/mswart/acme-mgmtserver/actions/workflows/push+deploy.yml/badge.svg)](https://github.com/mswart/acme-mgmtserver/actions/workflows/push+deploy.yml)
-[![Build Status](https://img.shields.io/pypi/v/acme-mgmtserver.svg)](https://pypi.python.org/pypi/acme-mgmtserver)
-[![Python Versions](https://img.shields.io/pypi/pyversions/acme-mgmtserver.svg)](https://pypi.python.org/pypi/acme-mgmtserver)
-[![PyPi Status](https://img.shields.io/pypi/status/acme-mgmtserver.svg)](https://pypi.python.org/pypi/acme-mgmtserver)
+[![Build Status](https://github.com/mswart/macen/actions/workflows/push+deploy.yml/badge.svg)](https://github.com/mswart/macen/actions/workflows/push+deploy.yml)
+[![Build Status](https://img.shields.io/pypi/v/macen.svg)](https://pypi.python.org/pypi/macen)
+[![Python Versions](https://img.shields.io/pypi/pyversions/macen.svg)](https://pypi.python.org/pypi/macen)
+[![PyPi Status](https://img.shields.io/pypi/status/macen.svg)](https://pypi.python.org/pypi/macen)
 
 
 [LetsEncrypt](https://letsencrypt.org) supports issuing free certificates by communication via ACME - the Automatically Certificate Management Evaluation protocol.
@@ -32,7 +32,7 @@ The normal webserver must be adjusted to forward `.well-known/acme-challenges` r
 #### Nginx
 
 ```
-upstream acme-mgmtserver {
+upstream macen {
     server ...;
 }
 server {
@@ -40,7 +40,7 @@ server {
     location /.well-known/acme-challenge {
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_pass http://acme-mgmtserver;
+        proxy_pass http://macen;
         # to support multiple acme mgmt server check challenge on all upstream server:
         proxy_next_upstream error timeout http_404;
     }
@@ -92,7 +92,7 @@ accept-terms-of-service = yes # or true
 # account dir; contains
 #   account.pem - private key to identify against the ACME server
 #   registration.json - the registration resource as JSON dump
-dir = /etc/acmems/account/
+dir = /etc/macen/account/
 
 [mgmt]
 # Management interface itself, the clients needs to talk to this
@@ -131,7 +131,7 @@ type = none
 [storage "file"]
 # caching on disk, the directory must be writeable for the daemon
 type = file
-directory=/etc/acmems/storage
+directory=/etc/macen/storage
 # cached certificates will be treated outdated if their expire date is less 
 # than $renew-within$ days away. A new certificate will be issued for the 
 # passed CSR, stored and returned in subsequencial requests
@@ -284,4 +284,4 @@ Recently new dependency version are expected. This is difficult to pin-point at 
 
 GPL License
 
-Copyright (c) 2015-2021, Malte Swart
+Copyright (c) 2015-2025, Malte Swart

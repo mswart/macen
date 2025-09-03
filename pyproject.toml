@@ -1,14 +1,9 @@
 [project]
-name = "acme-mgmtserver"
+name = "macen"
 version = "0.5.0a1"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
-dependencies = [
-    "acme>=0.21.0",
-    "josepy",
-    "IPy",
-    "pydantic>=2.11.7",
-]
+dependencies = ["acme>=0.21.0", "josepy", "IPy", "pydantic>=2.11.7"]
 description = "Basic Python Server to execute ACME on behalf of dumb clients"
 readme = "README.md"
 authors = [{ name = "Malte Swart", email = "mswart@devtation.de" }]
@@ -35,23 +30,23 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/mswart/acme-mgmtserver"
-Issues = "https://github.com/mswart/acme-mgmtserver/issues"
-Changelog = "https://github.com/mswart/acme-mgmtserver/blob/master/CHANGELOG.rst"
+Repository = "https://github.com/mswart/macen"
+Issues = "https://github.com/mswart/macen/issues"
+Changelog = "https://github.com/mswart/macen/blob/master/CHANGELOG.rst"
 
 [project.optional-dependencies]
 systemd = ["systemd"]
 dns01 = ["dnslib", "py3dns"]
 
 [project.scripts]
-acmems = "acmems.__main__:main"
+macen = "macen.__main__:main"
 
 [build-system]
 requires = ["uv_build>=0.8.6,<0.9.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "acmems"
+module-name = "macen"
 module-root = ""
 
 [dependency-groups]

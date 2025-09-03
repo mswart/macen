@@ -21,8 +21,8 @@ from cryptography.x509 import Certificate, CertificateSigningRequest
 from cryptography.x509.extensions import Extension, SubjectAlternativeName
 from cryptography.x509.oid import ExtensionOID, NameOID
 
-from acmems import config, manager
-from acmems.challenges import ChallengeImplementor
+from macen import config, manager
+from macen.challenges import ChallengeImplementor
 
 
 def M(

@@ -20,25 +20,24 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 import josepy.jwk
 import josepy.util
 
-from acmems import exceptions
-from acmems.config import Configurator
+from .config import Configurator
+from .exceptions import (
+    AccountError,
+    ChallengeFailed,
+    InvalidDomainName,
+    NeedToAgreeToTOS,
+    NoChallengeMethodsSupported,
+    RateLimited,
+)
 
 if TYPE_CHECKING:
-    from acmems.challenges import ChallengeImplementor
+    from .challenges import ChallengeImplementor
 
 logger = logging.getLogger(__name__)
 
 
 class ACMEManager:
-    """ACME manager - high level ACME client; process authorizations via
-        http01 automatically.
-
-    :ivar dict responses: Responses to deliver; designed as answers for
-        authorization challenges. dict[host][path] = value
-    :ivar dict authzrs: List of current active `acme.messages.AuthorizationResource`
-    :ivar acmems.config.Configuration config: Active configuration
-
-    """
+    """ACME manager - high level ACME client; process authorizations automatically."""
 
     def __init__(self, config: Configurator, connect: bool = True) -> None:
         self.responses: dict[str, dict[str, Any]] = {}
@@ -54,10 +53,6 @@ class ACMEManager:
     def connect(self) -> None:
         """initialize/setup ourself; load private key, create ACME client
         and refresh our registration
-
-        :raises acmems.exceptions.AccountError: could not load account
-        :raises acmems.exceptions.NeedToAgreeToTOS: terms of service are
-            not accepted - cannot operate
         """
         if self.account_key_created():
             self.load_private_key()
@@ -72,9 +67,6 @@ class ACMEManager:
     def load_private_key(self) -> None:
         """load our private key / the key to identify ourself against
         the ACME server. This key MUST NOT be used for certificates.
-
-        :raises acmems.exceptions.AccountError: something is broken
-            with our account (mustly key not found)
         """
         try:
             with open(self.config.keyfile, "rb") as f:
@@ -82,7 +74,7 @@ class ACMEManager:
                     f.read(), password=None, backend=default_backend()
                 )
         except FileNotFoundError:
-            raise exceptions.AccountError("Key {} not found".format(self.config.keyfile)) from None
+            raise AccountError("Key {} not found".format(self.config.keyfile)) from None
         # TODO - handle IOError; keyfile without valid key
         self.key = josepy.jwk.JWKRSA(key=josepy.util.ComparableRSAKey(key))
 
@@ -97,12 +89,9 @@ class ACMEManager:
 
         :param bool force: create new key even key exists already
         :param int key_size: private key size in bits (at least 2048)
-
-        :raises acmems.exceptions.AccountError: account dir not found
-            or private key will not be overriden (force is `False`).
         """
         if self.account_key_created() and not force:
-            raise exceptions.AccountError("Existing key is only override if I am forced to")
+            raise AccountError("Existing key is only override if I am forced to")
         key = rsa.generate_private_key(
             public_exponent=65537, key_size=key_size, backend=default_backend()
         )
@@ -158,17 +147,13 @@ class ACMEManager:
             self.registration = self.client.new_account(resource)
         except acme.messages.Error as err:
             if err.typ == "urn:ietf:params:acme:error:agreementRequired":
-                raise exceptions.NeedToAgreeToTOS(
-                    self.client.directory.meta.terms_of_service
-                ) from None
+                raise NeedToAgreeToTOS(self.client.directory.meta.terms_of_service) from None
             elif (
                 err.typ == "urn:ietf:params:acme:error:malformed"
                 and "must agree to terms of service" in err.detail
             ):
                 # fallback for boulder :-(
-                raise exceptions.NeedToAgreeToTOS(
-                    self.client.directory.meta.terms_of_service
-                ) from None
+                raise NeedToAgreeToTOS(self.client.directory.meta.terms_of_service) from None
             raise
         self.dump_registration()
 
@@ -202,9 +187,7 @@ class ACMEManager:
             with open(self.config.registration_file, "r") as f:
                 self.registration = acme.messages.RegistrationResource.json_loads(f.read())
         except FileNotFoundError:
-            raise exceptions.AccountError(
-                "Key is not yet registered or registration is losted!"
-            ) from None
+            raise AccountError("Key is not yet registered or registration is losted!") from None
         existing_regr = self.registration.json_dumps()
         self.client.net.account = self.registration
         self.registration = self.client.query_registration(self.registration)
@@ -214,7 +197,7 @@ class ACMEManager:
 
         # the terms of server needs to be agreed to use the ACME server!
         if tos := self.tos_agreement_required():
-            raise exceptions.NeedToAgreeToTOS(tos)
+            raise NeedToAgreeToTOS(tos)
 
     # ---------------------------------------------------------
     # 2. the real part (handling authorizations + certificates)
@@ -227,11 +210,6 @@ class ACMEManager:
         If we have cached a valid challenge return this.
         Expired challenges will clear automatically; invalided challenges
         will not.
-
-        :param csrpem: certificate sign request
-        :type domains: `str`
-        :returns: Challenges for the requested domains
-        :rtype: acme.messages.ChallengeBody
         """
         logger.info("Requesting a new order for a certificate")
         try:
@@ -239,17 +217,17 @@ class ACMEManager:
         except acme.messages.Error as e:
             logger.info("Request for a new order has been declined")
             if e.typ == "urn:ietf:params:acme:error:rejectedIdentifier":
-                raise exceptions.InvalidDomainName("unknown", e.detail) from None
+                raise InvalidDomainName("unknown", e.detail) from None
             elif e.typ == "urn:ietf:params:acme:error:rateLimited":
                 logger.warning("New certificate rejected due to rate limiting")
-                raise exceptions.RateLimited(e.detail) from None
+                raise RateLimited(e.detail) from None
             raise
         for authz in cast(tuple[acme.messages.AuthorizationResource, ...], order.authorizations):
             domain = authz.body.identifier.value
             logger.info("processing authorization for %s", domain)
             if not validator.new_authorization(authz.body, self.client, self.key, domain):
                 # HTTP01 is not support; no clue what to do ...
-                raise exceptions.NoChallengeMethodsSupported(
+                raise NoChallengeMethodsSupported(
                     "No supported challenge methods were offered for {}.".format(domain)
                 )
         logger.info("Awaiting for authorization to be validated")
@@ -257,7 +235,7 @@ class ACMEManager:
             return self.client.poll_authorizations(order, datetime.now() + timedelta(seconds=90))  # noqa: DTZ005 (acme expects offset-naive datetimes)
         except acme.errors.ValidationError:
             logger.error("Authorizations could not be validated!")
-            raise exceptions.ChallengeFailed() from None
+            raise ChallengeFailed() from None
 
     def issue_certificate(self, order: acme.messages.OrderResource) -> str:
         # Request a certificate using the CSR and some number of domain validation challenges.
@@ -267,7 +245,7 @@ class ACMEManager:
         except acme.messages.Error as e:
             if e.typ == "urn:ietf:params:acme:error:rateLimited":
                 logger.warning("New certificate rejected due to rate limiting")
-                raise exceptions.RateLimited(e.detail) from None
+                raise RateLimited(e.detail) from None
             logger.warning("Certificate issueing failed")
             raise  # unhandled
         logger.info("New certificate issued")

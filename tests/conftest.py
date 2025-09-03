@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPrivateKeyTypes
 import pytest
 
-from acmems import challenges, server
+from macen import challenges, server
 from tests.helpers import MA, M
 
 

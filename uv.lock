@@ -19,52 +19,6 @@ wheels = [
 ]
 
 [[package]]
-name = "acme-mgmtserver"
-version = "0.5.0a1"
-source = { editable = "." }
-dependencies = [
-    { name = "acme" },
-    { name = "ipy" },
-    { name = "josepy" },
-    { name = "pydantic" },
-]
-
-[package.optional-dependencies]
-dns01 = [
-    { name = "dnslib" },
-    { name = "py3dns" },
-]
-systemd = [
-    { name = "systemd" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "acme", specifier = ">=0.21.0" },
-    { name = "dnslib", marker = "extra == 'dns01'" },
-    { name = "ipy" },
-    { name = "josepy" },
-    { name = "py3dns", marker = "extra == 'dns01'" },
-    { name = "pydantic", specifier = ">=2.11.7" },
-    { name = "systemd", marker = "extra == 'systemd'" },
-]
-provides-extras = ["systemd", "dns01"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.4.1" },
-    { name = "ruff", specifier = ">=0.12.7" },
-    { name = "ty", specifier = ">=0.0.1a17" },
-]
-
-[[package]]
 name = "annotated-types"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -327,6 +281,52 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/9d/19/4ebe24c42c341c5868dff072b78d503fc1b0725d88ea619d2db68f5624a9/josepy-2.1.0.tar.gz", hash = "sha256:9beafbaa107ec7128e6c21d86b2bc2aea2f590158e50aca972dca3753046091f", size = 56189, upload-time = "2025-07-08T17:20:54.98Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/47/0e/e248f059986e376b87e546cd840d244370b9f7ef2b336456f0c2cfb2fef0/josepy-2.1.0-py3-none-any.whl", hash = "sha256:0eadf09b96821bdae9a8b14145425cb9fe0bbee64c6fdfce3ccd4ceb7d7efbbd", size = 29065, upload-time = "2025-07-08T17:20:53.504Z" },
+]
+
+[[package]]
+name = "macen"
+version = "0.5.0a1"
+source = { editable = "." }
+dependencies = [
+    { name = "acme" },
+    { name = "ipy" },
+    { name = "josepy" },
+    { name = "pydantic" },
+]
+
+[package.optional-dependencies]
+dns01 = [
+    { name = "dnslib" },
+    { name = "py3dns" },
+]
+systemd = [
+    { name = "systemd" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "acme", specifier = ">=0.21.0" },
+    { name = "dnslib", marker = "extra == 'dns01'" },
+    { name = "ipy" },
+    { name = "josepy" },
+    { name = "py3dns", marker = "extra == 'dns01'" },
+    { name = "pydantic", specifier = ">=2.11.7" },
+    { name = "systemd", marker = "extra == 'systemd'" },
+]
+provides-extras = ["systemd", "dns01"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.4.1" },
+    { name = "ruff", specifier = ">=0.12.7" },
+    { name = "ty", specifier = ">=0.0.1a17" },
 ]
 
 [[package]]

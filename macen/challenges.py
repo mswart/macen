@@ -13,8 +13,8 @@ import acme.messages
 import josepy.jwk
 import pydantic
 
-from acmems.config import ConfigurationError, Configurator, default_config, iter_addrinfo
-from acmems.server import ACMEHTTPHandler, ThreadedACMEServerByType
+from .config import ConfigurationError, Configurator, default_config, iter_addrinfo
+from .server import ACMEHTTPHandler, ThreadedACMEServerByType
 
 ListenerInfo = tuple[
     socket.AddressFamily,

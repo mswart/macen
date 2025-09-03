@@ -4,12 +4,12 @@ import socket
 import socketserver
 from typing import TYPE_CHECKING, Any
 
-from acmems import exceptions
-from acmems.auth import Authenticator
-from acmems.manager import ACMEManager
+from .auth import Authenticator
+from .exceptions import ChallengeFailed, PayloadInvalid, PayloadToLarge, RateLimited
+from .manager import ACMEManager
 
 if TYPE_CHECKING:
-    from acmems.challenges import HttpChallengeImplementor
+    from .challenges import HttpChallengeImplementor
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ class ACMEMgmtHandler(ACMEAbstractHandler):
         extra: dict[str, Any] = {
             "client_ip": self.client_address,
             "path": self.path,
-            "endpoint": "acmems",
+            "endpoint": "macen",
             "host": self.headers.get("Host", "<unknown>"),
         }
         if self.path != "/sign":
@@ -110,18 +110,18 @@ class ACMEMgmtHandler(ACMEAbstractHandler):
                 p.storage.add_to_cache(p.csrpem, certs)
                 logger.info("New certificate issued", extra=extra)
                 self.send_data(certs)
-        except exceptions.PayloadToLarge as e:
+        except PayloadToLarge as e:
             logger.warning(
                 "Payload (CSR) to large (%s submitted > %s allowed)", e.size, e.allowed, extra=extra
             )
             self.send_error(413)
-        except exceptions.PayloadInvalid:
+        except PayloadInvalid:
             logger.warning("Payload (CSR) could not be parsed", extra=extra)
             self.send_error(415)
-        except exceptions.ChallengeFailed:
+        except ChallengeFailed:
             logger.warning("Unable to validate wanted domains!")
             self.send_error(421, "Misdirected Request: Validation failed")
-        except exceptions.RateLimited:
+        except RateLimited:
             logger.warning("Payload (CSR) could not be parsed", extra=extra)
             self.send_error(429, "Certificate declined due to rate limiting")
         except Exception:

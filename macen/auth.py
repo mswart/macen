@@ -23,14 +23,14 @@ from cryptography.x509.extensions import Extension, SubjectAlternativeName
 from cryptography.x509.oid import ExtensionOID, NameOID
 from IPy import IP
 
-from acmems import exceptions
+from . import exceptions
 
 if TYPE_CHECKING:
     from typing import Self
 
-    from acmems.challenges import ChallengeImplementor
-    from acmems.config import Configurator
-    from acmems.storages import StorageImplementor
+    from .challenges import ChallengeImplementor
+    from .config import Configurator
+    from .storages import StorageImplementor
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +202,7 @@ class Block:
                 try:
                     validator = config.validators[value.strip()]
                 except KeyError:
-                    from acmems.config import UnknownVerificationError
+                    from macen.config import UnknownVerificationError
 
                     raise UnknownVerificationError(
                         'Validator "{}" undefined'.format(value.strip())
@@ -212,7 +212,7 @@ class Block:
                 try:
                     storage = config.storages[value.strip()]
                 except KeyError:
-                    from acmems.config import UnknownStorageError
+                    from macen.config import UnknownStorageError
 
                     raise UnknownStorageError(
                         'Storage "{}" undefined'.format(value.strip())
@@ -227,7 +227,7 @@ class Block:
                     if option in method.option_names():
                         break
                 else:
-                    from acmems.config import UnusedOptionWarning
+                    from macen.config import UnusedOptionWarning
 
                     warnings.warn(
                         'Option unknown [auth "{}"]{} = {}'.format(self.name, option, value),
@@ -239,7 +239,7 @@ class Block:
                 self.methods.append(method())
                 self.methods[-1].parse(option, value)
         if validator is None:
-            from acmems.config import UnknownVerificationError
+            from macen.config import UnknownVerificationError
 
             raise UnknownVerificationError(
                 'auth "{}" does not define a validator and the default one is disabled'.format(
@@ -249,7 +249,7 @@ class Block:
         else:
             self.validator = validator
         if storage is None:
-            from acmems.config import UnknownStorageError
+            from macen.config import UnknownStorageError
 
             raise UnknownStorageError(
                 'auth "{}" does not define a storage and the default one is disabled'.format(

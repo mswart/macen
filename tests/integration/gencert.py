@@ -21,7 +21,7 @@ env["FAKE_DNS"] = (
 if sys.argv[1] == "pebble":
     env["ACME_CAFILE"] = os.path.expanduser("~/build/letsencrypt/pebble/pebble.minica.pem")
 
-server = subprocess.Popen(["acmems", "configs/integration-{}.ini".format(sys.argv[1])], env=env)  # noqa: S603, S607
+server = subprocess.Popen(["macen", "configs/integration-{}.ini".format(sys.argv[1])], env=env)  # noqa: S603, S607
 time.sleep(2)
 
 try:
