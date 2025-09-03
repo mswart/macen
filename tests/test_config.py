@@ -5,7 +5,7 @@ from typing import cast
 import pydantic
 import pytest
 
-from acmems import challenges, config, storages
+from macen import challenges, config, storages
 
 
 def parse(configcontent: str) -> config.Configurator:

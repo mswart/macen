@@ -19,7 +19,7 @@ else:
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 
-from acmems.config import ConfigurationError, Configurator, default_config
+from .config import ConfigurationError, Configurator, default_config
 
 
 class StorageImplementor:

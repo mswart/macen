@@ -6,9 +6,9 @@ from typing import cast
 from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPrivateKeyTypes
 import pytest
 
-from acmems import auth, challenges, config, storages
-from acmems.auth import Authenticator
-from acmems.config import Configurator
+from macen import auth, challenges, config, storages
+from macen.auth import Authenticator
+from macen.config import Configurator
 from tests.helpers import gencsrpem
 
 

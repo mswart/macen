@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPri
 import josepy.jwk
 import pytest
 
-from acmems import challenges, exceptions
+from macen import challenges, exceptions
 from tests.conftest import ACMEBackend
 from tests.helpers import M, gencsrpem, randomize_domains
 

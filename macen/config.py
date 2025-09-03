@@ -1,5 +1,5 @@
 """
-This module contains mainly the `acmems.config.Configurator` class. It
+This module contains mainly the `.config.Configurator` class. It
 parses configuration files. It valides all options are known and in the
 correct format. It might raise a dedicated error or warning upon issues.
 
@@ -22,7 +22,7 @@ import warnings
 
 import pydantic
 
-from acmems.auth import Authenticator
+from .auth import Authenticator
 
 ListenerInfo = tuple[
     socket.AddressFamily,
@@ -33,8 +33,8 @@ ListenerInfo = tuple[
 ]
 
 if TYPE_CHECKING:
-    from acmems.challenges import ChallengeImplementor
-    from acmems.storages import StorageImplementor
+    from .challenges import ChallengeImplementor
+    from .storages import StorageImplementor
 
 
 class ConfigurationError(Exception):
@@ -298,7 +298,7 @@ class Configurator:
         option, value = options.pop(0)
         if option != "type":
             raise ConfigurationError("A verification must start with the type value!")
-        from acmems.challenges import setup
+        from .challenges import setup
 
         self.validators[name] = setup(value, name, options)
 
@@ -312,7 +312,7 @@ class Configurator:
         if len(self.validators) == 1:  # we use the only defined validator as default
             self.default_validator = next(iter(self.validators.values()))
         else:  # define a default http storage
-            from acmems.challenges import setup
+            from .challenges import setup
 
             self.default_validator = self.validators["http"] = setup("http01", "http", [])
 
@@ -320,7 +320,7 @@ class Configurator:
         option, value = options.pop(0)
         if option != "type":
             raise ConfigurationError("A storage must start with the type value!")
-        from acmems.storages import setup
+        from .storages import setup
 
         self.storages[name] = setup(value, name, options)
 
@@ -333,7 +333,7 @@ class Configurator:
         if len(self.storages) == 1:
             self.default_storage = next(iter(self.storages.values()))
         else:
-            from acmems.storages import setup
+            from .storages import setup
 
             self.default_storage = self.storages["none"] = setup("none", "none", [])
 

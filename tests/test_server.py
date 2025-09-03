@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPri
 from cryptography.x509 import load_pem_x509_certificate
 import pytest
 
-from acmems import challenges, server
+from macen import challenges, server
 from tests.conftest import ACMEBackend, MgmtServer
 from tests.helpers import MA, M, extract_alt_names, gencsrpem, randomize_domains
 

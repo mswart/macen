@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s " + importlib.metadata.version("acme-mgmtserver"),
+        version="%(prog)s " + importlib.metadata.version("macen"),
     )
 
     args = parser.parse_args()

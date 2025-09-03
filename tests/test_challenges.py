@@ -4,7 +4,7 @@ import acme.messages
 from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPrivateKeyTypes
 import pytest
 
-from acmems import challenges, exceptions
+from macen import challenges, exceptions
 from tests.conftest import ACMEBackend
 from tests.helpers import gencsrpem, randomize_domains
 

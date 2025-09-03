@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPri
 import pydantic
 import pytest
 
-from acmems import storages
+from macen import storages
 
 from .helpers import gencsrpem, signcsr
 

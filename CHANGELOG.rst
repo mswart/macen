@@ -15,8 +15,13 @@ Modernize project
 * Switch to pyproject.toml (instead of setup.py); use scripts instead of custom binaries
 * Auto-format code
 * Configure linter and fix diagnostics
-* Refresh supported Python versions (now 3.9 to 3.13)
+* Refresh supported Python versions (now 3.10 to 3.13)
 
+Merge register cli into server startup to automatically register if needed.
+
+Rename project to "Macen":
+The similarity to mason is welcome (as ACME server are called boulder and pebble),
+but uses the letters of ACME.
 
 v0.4.1
 ^^^^^^
