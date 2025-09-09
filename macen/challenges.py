@@ -189,7 +189,7 @@ class DnsChallengeServerImplementor(DnsChallengeImplementor):
         )
 
 
-class DnsChallengeBoulderImplementor(DnsChallengeImplementor):
+class DnsChalltestsrvImplementor(DnsChallengeImplementor):
     class Config(DnsChallengeImplementor.Config):
         set_txt_url: str = pydantic.Field(
             default="http://localhost:8055/set-txt", alias="set-txt_url"
@@ -240,7 +240,7 @@ class DnsChallengeDnsUpdateImplementor(DnsChallengeImplementor):
 
 implementors: dict[str, type[ChallengeImplementor]] = {
     "http01": HttpChallengeImplementor,
-    "dns01-boulder": DnsChallengeBoulderImplementor,
+    "dns01-challtestsrv": DnsChalltestsrvImplementor,
     "dns01-server": DnsChallengeServerImplementor,
     "dns01-dnsUpdate": DnsChallengeDnsUpdateImplementor,
 }
@@ -252,8 +252,8 @@ def setup(
 ) -> HttpChallengeImplementor: ...
 @overload
 def setup(
-    type: Literal["dns01-boulder"], name: str, options: Sequence[tuple[str, str]]
-) -> DnsChallengeBoulderImplementor: ...
+    type: Literal["dns01-challtestsrv"], name: str, options: Sequence[tuple[str, str]]
+) -> DnsChalltestsrvImplementor: ...
 @overload
 def setup(
     type: Literal["dns01-server"], name: str, options: Sequence[tuple[str, str]]

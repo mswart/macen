@@ -257,7 +257,7 @@ Error code:
 
 ## Testing
 
-The server is tested by unit tests, integration tests against test ACME servers ([Boulder](https://github.com/letsencrypt/boulder) and [Pebble](https://github.com/letsencrypt/boulder)) and with end-to-end tests. All major features should be covered like authentication, HTTP requests, validation methods (HTTP01, DNS01), different CSR and certificate algorithms (RSA and EC).
+The server is tested by unit tests, integration tests against the "official" ACME test server [Pebble](https://github.com/letsencrypt/pebble)) and with end-to-end tests. All major features should be covered like authentication, HTTP requests, validation methods (HTTP01, DNS01), different CSR and certificate algorithms (RSA and EC).
 
 The test are exectued by `py.test`. `docker-compose` is used to run the ACME servers. Take a look at `tests/scripts` to inspect the commands, that are run as part of the CI.
 
