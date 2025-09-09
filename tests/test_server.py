@@ -277,21 +277,21 @@ def test_mgmt_complete_one_domain(
 
 def test_mgmt_complete_one_domain_by_dns(
     backend: ACMEBackend,
-    dnsboulder_validator: challenges.DnsChallengeBoulderImplementor,
+    dnschalltestsrv_validator: challenges.DnsChalltestsrvImplementor,
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
     server.ACMEAbstractHandler.manager = M(
         backend.registered_account
         + """
-        [verification "boulder"]
-        type = dns01-boulder
+        [verification "challtestsrv"]
+        type = dns01-challtestsrv
         [auth "localhost"]
         ip = 127.0.0.0/24
         domain=*
         """,
         connect=True,
-        validator=dnsboulder_validator,
+        validator=dnschalltestsrv_validator,
     )
     domains = randomize_domains("debug.fullexample{}.org")
     csr = gencsrpem(domains, ckey)
@@ -306,21 +306,21 @@ def test_mgmt_complete_one_domain_by_dns(
 
 def test_mgmt_complete_wildcard_domain(
     backend: ACMEBackend,
-    dnsboulder_validator: challenges.DnsChallengeBoulderImplementor,
+    dnschalltestsrv_validator: challenges.DnsChalltestsrvImplementor,
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
     server.ACMEAbstractHandler.manager = M(
         backend.registered_account
         + """
-        [verification "boulder"]
-        type = dns01-boulder
+        [verification "challtestsrv"]
+        type = dns01-challtestsrv
         [auth "localhost"]
         ip = 127.0.0.0/24
         domain=*
         """,
         connect=True,
-        validator=dnsboulder_validator,
+        validator=dnschalltestsrv_validator,
     )
     domains = randomize_domains("fullexample{}.org", "*.fullexample{}.org")
     csr = gencsrpem(domains, ckey)
@@ -346,26 +346,3 @@ def test_mgmt_for_certificate_error(
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen("http://127.0.0.1:{}/sign".format(mgmt_server.server_port), csr)
     assert e.value.code == 421
-
-
-def test_complete_rate_limit_on_certificate_creation(
-    backend: ACMEBackend,
-    http_server: challenges.HttpChallengeImplementor,
-    mgmt_server: MgmtServer,
-    ckey: CertificateIssuerPrivateKeyTypes,
-) -> None:
-    if backend.name == "pebble":
-        return pytest.skip("Rate limiting is not implemented in pebble!")
-    backend.registered_manager(validator=http_server)
-    domains = randomize_domains("debug.fullexample{}.org")
-    csr = gencsrpem(domains, ckey)
-    for _ in range(5):
-        response = urllib.request.urlopen(
-            "http://127.0.0.1:{}/sign".format(mgmt_server.server_port), csr
-        )
-        certs = response.read()
-        assert b"-----BEGIN CERTIFICATE-----" in certs
-        assert b"-----END CERTIFICATE-----" in certs
-    with pytest.raises(urllib.error.HTTPError) as e:
-        urllib.request.urlopen("http://127.0.0.1:{}/sign".format(mgmt_server.server_port), csr)
-    assert e.value.code == 429

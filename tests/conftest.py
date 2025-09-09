@@ -68,7 +68,6 @@ class ACMEBackend:
 
 
 test_backends: list[ACMEBackend] = [
-    ACMEBackend("boulder", "http://127.0.0.1:4001/directory", "https:"),
     ACMEBackend("pebble", "https://127.0.0.1:14000/dir", "data:"),
 ]
 
@@ -112,9 +111,9 @@ def http_server(request: pytest.FixtureRequest) -> challenges.HttpChallengeImple
 
 
 @pytest.fixture(scope="session")
-def dnsboulder_validator(backend: ACMEBackend) -> challenges.DnsChallengeBoulderImplementor:
+def dnschalltestsrv_validator(backend: ACMEBackend) -> challenges.DnsChalltestsrvImplementor:
     validator = challenges.setup(
-        "dns01-boulder", "dns", [("set-txt_url", backend.challtestapi + "/set-txt")]
+        "dns01-challtestsrv", "dns", [("set-txt_url", backend.challtestapi + "/set-txt")]
     )
     validator.start()
     return validator

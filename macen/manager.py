@@ -152,7 +152,7 @@ class ACMEManager:
                 err.typ == "urn:ietf:params:acme:error:malformed"
                 and "must agree to terms of service" in err.detail
             ):
-                # fallback for boulder :-(
+                # fallback (agreementRequired isn't standardized)
                 raise NeedToAgreeToTOS(self.client.directory.meta.terms_of_service) from None
             raise
         self.dump_registration()
