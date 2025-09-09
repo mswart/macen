@@ -80,8 +80,13 @@ jobs:
         run: tests/scripts/setup-${{ matrix.acme-server }}.sh
       - name: 'Running pytest'
         run: tests/scripts/pytest-${{ matrix.acme-server }}.sh
-      - name: 'Integration: generate certificate'
-        run: tests/integration/gencert.py ${{ matrix.acme-server }}
+      - name: 'Integration: generate certificate (venv)'
+        run: tests/integration/gencert.py venv ${{ matrix.acme-server }}
+      - name: 'Integration: generate certificate (docker)'
+        run: tests/integration/gencert.py docker ${{ matrix.acme-server }}
+      - name: 'Logs'
+        if: failure()
+        run: tests/scripts/logs-${{ matrix.acme-server }}.sh
   release:
     runs-on: ubuntu-latest
     needs:
@@ -104,5 +109,30 @@ jobs:
         run: uv sync --locked --all-extras --dev
       - name: Build wheel
         run: uv build
+      - id: version
+        run: python -c 'import tomllib; v = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]; print(f"VERSION={v}")' > ${GITHUB_OUTPUT}
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
       - name: Publish package
         run: uv publish
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: mswart
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push docker image
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: ${{ steps.version.outputs.VERSION }}
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ghcr.io/mswart/macen
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

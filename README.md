@@ -73,6 +73,17 @@ My preferred installation method are distribution packages. I try to published a
 
 The server and all its dependencies are available on PyPi and can be installed by Python package manager like pip e.g. inside a virtualenv.
 
+### Container image
+
+Use can use the docker image to get a bundled application: `ghcr.io/mswart/macen`.
+You need to mount the config into the image and pass its filename as argument.
+
+Example usage:
+
+```sh
+docker run -v ./config:/config -p 1313:1313 macen:latest /config/main.ini
+```
+
 
 ## Configuration
 
