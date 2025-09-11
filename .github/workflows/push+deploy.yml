@@ -111,14 +111,19 @@ jobs:
         run: uv sync --locked --all-extras --dev
       - name: Build wheel
         run: uv build
-      - id: version
-        run: python -c 'import tomllib; v = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]; print(f"VERSION={v}")' > ${GITHUB_OUTPUT}
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/mswart/macen
       - name: Build and push Docker image
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
       - name: Publish package
         run: uv publish
       - name: Log in to the Container registry
@@ -131,7 +136,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           push: true
-          tags: ${{ steps.version.outputs.VERSION }}
+          tags: ${{ steps.meta.outputs.tags }}
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v3
         with:
