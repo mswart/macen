@@ -1,14 +1,18 @@
 ChangeLog
 =========
 
-This page lists all versions with its changes. ACMEMS follows Semantic Versioning.
+This page lists all versions with its changes. Macen follows Semantic Versioning.
 
 
 Version 0
 -------------------------
 
-v0.5.0 (unreleased)
+v0.5.0 (2025-09-11)
 ^^^^^^^^^^^^^^^^^^^
+
+Rename project to "Macen":
+The similarity to mason is welcome (as ACME server are called boulder and pebble),
+but uses the letters of ACME.
 
 Modernize project
 
@@ -19,9 +23,6 @@ Modernize project
 
 Merge register cli into server startup to automatically register if needed.
 
-Rename project to "Macen":
-The similarity to mason is welcome (as ACME server are called boulder and pebble),
-but uses the letters of ACME.
 
 v0.4.1
 ^^^^^^

@@ -1,15 +1,17 @@
-Macen (Previously ACME Management Server (ACMEMS)
-=================================================
+Macen - ACME as a central service
+=================================
+
+*Formally named ACME Management Server (ACMEMS)*
 
 [![Build Status](https://github.com/mswart/macen/actions/workflows/push+deploy.yml/badge.svg)](https://github.com/mswart/macen/actions/workflows/push+deploy.yml)
-[![Build Status](https://img.shields.io/pypi/v/macen.svg)](https://pypi.python.org/pypi/macen)
+[![Current Version](https://img.shields.io/pypi/v/macen.svg)](https://pypi.python.org/pypi/macen)
 [![Python Versions](https://img.shields.io/pypi/pyversions/macen.svg)](https://pypi.python.org/pypi/macen)
 [![PyPi Status](https://img.shields.io/pypi/status/macen.svg)](https://pypi.python.org/pypi/macen)
 
 
 [LetsEncrypt](https://letsencrypt.org) supports issuing free certificates by communication via ACME - the Automatically Certificate Management Evaluation protocol.
 
-This tools is yet another ACME client ... but as a client/server model.
+This tools is yet another ACME client ... but as a client/server model. It solves challenges on behalf of dumb clients.
 
 
 ## Why yet another ACME client
@@ -20,7 +22,7 @@ Some aspects are special:
 * **Only the server requires all the ACME dependencies**: The clients require only a SSL tool like OpenSSL and a HTTP client like wget or curl, no python, no build tools. Python with python-acme and its dependencies (PyOpenSSL, Cryptography, ...) is only needed for the server.
 * **Supports distributed web servers**: All `.well-known/acme-challenges` requests for all domains can be served directly by the server. This makes it easy to validate domains when using multiple web server in distributed or fail-over fashion by forwarding all `.well-known/acme-challenges` requests.
 * **Only the server needs the ACME account information**: It is not that security relevant, but only the ACME Management Server needs access to the account information / key for the ACME server like LetsEncrypt.
-* **Caching CSR signs**: The returned signed certificate of a CSR is cached until the certificate is nearly expired (per default two week). If two machines have manual shared a key and CSR and they reusing both, they will both get from ACMEMS the same certificate back.
+* **Caching CSR signs**: The returned signed certificate of a CSR is cached until the certificate is nearly expired (per default two week). If two machines have manual shared a key and CSR and they reusing both, they will both get from Macen the same certificate back.
 
 
 ## Domain Validations / Challenges.
@@ -54,24 +56,16 @@ This passes all ACME challenges to the management server. `proxy_next_upstream h
 
 Up to you - I am happy to accept a PR to complete this.
 
-### TLSNI01
-
-`TLSNI01` is currently not supported, but there are few things are missing. Feel free to open a PR or talk to me if you have use for this challenge type.
-
 ### DNS01
 
-ACMEMS can instrument DNS servers to serve the needed `TXT` records to validate domain names via `DNS01` challenge. The DNS servers will be updated vis DNS update. Currently there is no security for the updates implemented. We expect that the zone name managed by the name server are second-level domain name (like `example.org`).
+Macen can instrument DNS servers to serve the needed `TXT` records to validate domain names via `DNS01` challenge. The DNS servers will be updated vis DNS update. Currently there is no security for the updates implemented. We expect that the zone name managed by the name server are second-level domain name (like `example.org`).
 
 
 ## Installation
 
-### Debian Packages
-
-My preferred installation method are distribution packages. I try to published a packaged version in my own [PPA](https://launchpad.net/~malte.swart/+archive/ubuntu/acme). To goal is to support the current LTS version and the previous version for a upgrade period. The software dependencies should be directly available as distribution packages.
-
 ### PyPI
 
-The server and all its dependencies are available on PyPi and can be installed by Python package manager like pip e.g. inside a virtualenv.
+The server and all its dependencies are available on PyPi and can be installed by Python package manager like pip or uv.
 
 ### Container image
 
@@ -275,7 +269,9 @@ The test are exectued by `py.test`. `docker-compose` is used to run the ACME ser
 
 ## Support
 
-The goal is to be compatible with all supported Python versions. But adjusting the CI and publishing a new release might take some time. This primarily means that removing support for a EOL Python version is not considered a breaking change and will happen in normal minor releases (but not in patch/bug-fix releases).
+Ideally, macen is compatible with all still supported Python versions.
+However, it does limit the usable features: therefore, the minimal Python version might be bumped earlier.
+At the very least, Macen aims to be compatible with the Python versions shipped in the latest Ubuntu LTS and Debian versions (thats usually the latest 2-3).
 
 Recently new dependency version are expected. This is difficult to pin-point at the moment, but the idea is to be compatible with the version from the latest Ubuntu LTS and Debian releases. The minimal dependency versions are tried to express. But as the CI does not run tests for all existing versions, they could be slightly out-of-date from time to time.
 
