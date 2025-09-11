@@ -5,9 +5,7 @@ and might be raised in other methods.
 
 
 class AcmeException(Exception):
-    """Base exception call to be able to catch all ACMEMS specific
-    errors
-    """
+    """Base exception call to be able to catch all Macen specific errors"""
 
 
 class NoChallengeMethodsSupported(AcmeException):
