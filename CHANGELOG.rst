@@ -23,6 +23,8 @@ Modernize project
 
 Merge register cli into server startup to automatically register if needed.
 
+Offer container images via ghcr.io/mswart/macen.
+
 
 v0.4.1
 ^^^^^^
