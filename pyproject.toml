@@ -43,7 +43,7 @@ dns01 = ["dnslib", "py3dns"]
 macen = "macen.__main__:main"
 
 [build-system]
-requires = ["uv_build>=0.8.6,<0.9.0"]
+requires = ["uv_build>=0.8.6,<0.10.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

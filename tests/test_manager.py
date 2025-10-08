@@ -2,6 +2,7 @@ from pathlib import Path
 import random
 import shutil
 from typing import cast
+from unittest.mock import Mock
 
 import acme
 import acme.client
@@ -73,6 +74,40 @@ def test_override_key(tmp_path: Path) -> None:
 ### register
 def randomized_email() -> str:
     return "acme@pytest{}.org".format(random.randint(0, 2**16))  # noqa: S311
+
+
+@pytest.mark.parametrize(
+    ("error_type", "detail", "needs_tos"),
+    [
+        ("agreementRequired", None, True),
+        ("malformed", "must agree to terms of service", True),
+        ("userActionRequired", "Provided account did not agree to the terms of service", True),
+        ("userActionRequired", "Please verify your account email", False),
+        ("userActionRequired", None, False),
+        ("malformed", "Invalid account contact", False),
+        ("unauthorized", "Unable to update terms of service", False),
+    ],
+)
+def test_register_error_handling(error_type: str, detail: str | None, needs_tos: bool) -> None:
+    m = M("""[account]
+        dir = tests/support/valid
+        [mgmt]""")
+    m.load_private_key()
+    error = acme.messages.Error(typ=f"urn:ietf:params:acme:error:{error_type}", detail=detail)
+    tos_url = "https://example.org/terms"
+    client = Mock(spec=acme.client.ClientV2)
+    client.directory = acme.messages.Directory.from_json({"meta": {"termsOfService": tos_url}})
+    client.new_account.side_effect = error
+    m.client = client
+
+    if needs_tos:
+        with pytest.raises(exceptions.NeedToAgreeToTOS) as tos_error:
+            m.register(tos_agreement=False)
+        assert tos_error.value.url == tos_url
+    else:
+        with pytest.raises(acme.messages.Error) as account_error:
+            m.register(tos_agreement=False)
+        assert account_error.value is error
 
 
 def test_register_with_general_tos(backend: ACMEBackend, tmp_path: Path) -> None:
