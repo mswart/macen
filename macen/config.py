@@ -1,136 +1,90 @@
-"""
-This module contains mainly the `.config.Configurator` class. It
-parses configuration files. It valides all options are known and in the
-correct format. It might raise a dedicated error or warning upon issues.
+"""INI/TOML loading and validation, separate from runtime construction.
 
-The parsed configuration is stored as instance variables and referenced
-options are directly instanciated.
+Files are merged before references are resolved. Later scalar settings and named
+providers replace earlier values; policies append in command-line order.
 """
 
-from collections.abc import Generator
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import importlib
 import io
-import logging
-import logging.config
-import logging.handlers
 from pathlib import Path
 import re
-import socket
 import sys
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 import warnings
 
 import pydantic
 
-from .auth import Authenticator
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib  # type: ignore[unresolved-import]
 
-ListenerInfo = tuple[
-    socket.AddressFamily,
-    socket.SocketKind,
-    int,
-    str,
-    tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes],
-]
+from .application import Components, build_components
+from .auth import AuthenticationRegistry, MethodSpec, auth_methods
+from .settings import (
+    AccountConfig,
+    ConfigurationError,
+    MgmtConfig,
+    StrictConfig,
+    UnknownStorageError,
+    UnknownVerificationError,
+    UnusedOptionWarning,
+    UnusedSectionWarning,
+    aggregate,
+    parse_group,
+)
 
 if TYPE_CHECKING:
     from .challenges import ChallengeImplementor
     from .storages import StorageImplementor
 
-
-class ConfigurationError(Exception):
-    pass
+P = TypeVar("P", "ChallengeImplementor", "StorageImplementor")
 
 
-class MissingSectionError(ConfigurationError):
-    pass
+class RouteConfig(StrictConfig):
+    provider: str
+    domains: list[str] = pydantic.Field(default_factory=list)
+    wildcard: bool | None = None
+
+    @pydantic.model_validator(mode="after")
+    def needs_selector(self) -> "RouteConfig":
+        if not self.domains and self.wildcard is None:
+            raise ValueError("A verification rule needs domains or wildcard")
+        return self
 
 
-class UnknownVerificationError(ConfigurationError):
-    pass
+class RoutingConfig(StrictConfig):
+    default: str | Literal[False] | None = None
+    rules: list[RouteConfig] = pydantic.Field(default_factory=list)
 
 
-class UnknownStorageError(ConfigurationError):
-    pass
+class VerificationConfig(RoutingConfig):
+    providers: dict[str, dict[str, Any]] = pydantic.Field(default_factory=dict)
 
 
-class SingletonOptionRedifined(ConfigurationError):
-    def __init__(self, section: str, option: str, old: Any, new: Any) -> None:  # noqa: ANN401 (value are for informational purpose only)
-        self.section = section
-        self.option = option
-        self.old = old
-        self.new = new
-
-    def __str__(self) -> str:
-        return "Singleton option redefined: {}.{} was {}, redefined as {}".format(
-            self.section, self.option, self.old, self.new
-        )
+class PolicyConfig(StrictConfig):
+    name: str = ""
+    domains: list[str] = pydantic.Field(default_factory=list)
+    auth: dict[str, dict[str, Any]] = pydantic.Field(min_length=1)
+    verification: str | RoutingConfig | None = None
+    storage: str | None = None
 
 
-class ConfigurationWarning(UserWarning):
-    pass
+class SetupConfig(StrictConfig):
+    plugins: list[str] = pydantic.Field(default_factory=list, alias="plugin")
+    include_paths: list[str] = pydantic.Field(default_factory=list, alias="include-path")
 
 
-class UnusedOptionWarning(ConfigurationWarning):
-    pass
-
-
-class OptionRedifinitionWarning(ConfigurationWarning):
-    pass
-
-
-class UnusedSectionWarning(ConfigurationWarning):
-    pass
-
-
-# Default config that should be used by all pydantic based config sections.
-default_config: pydantic.ConfigDict = pydantic.ConfigDict(
-    alias_generator=lambda n: n.replace("_", "-"), extra="allow"
-)
-
-
-def extract_bool(value: str | Any) -> bool | str | Any:  # noqa: ANN401
-    if value in ("false", "no"):
-        return False
-    if value in ("true", "yes"):
-        return True
-    return value
-
-
-class AccountConfig(pydantic.BaseModel):
-    model_config = default_config.copy()
-
-    acme_server: str = "https://acme-staging-v02.api.letsencrypt.org/directory"
-    accept_terms_of_service: Annotated[
-        bool | str | list[str], pydantic.AfterValidator(extract_bool)
-    ] = False
-    dir: Path
-
-
-class MgmtConfig(pydantic.BaseModel):
-    model_config = default_config.copy()
-
-    max_size: pydantic.ByteSize = pydantic.ByteSize(4096)
-    default_verification: Literal[False] | str | None = None
-    default_storage: str | Literal[False] | None = None
-    listeners: list[str] | str = pydantic.Field(
-        default=["127.0.0.1:1313", "[::1]:1313"], alias="listener"
-    )
-
-
-T = TypeVar("T", bound=pydantic.BaseModel)
-
-
-class Configurator:
-    def __init__(self, *configs: io.TextIOBase) -> None:
-        self.validators: "dict[str, ChallengeImplementor]" = {}
-        self.default_validator: "ChallengeImplementor | None" = None
-        self.storages: "dict[str, StorageImplementor]" = {}
-        self.default_storage: "StorageImplementor | None" = None
-        self.mgmt = MgmtConfig()
-
-        self.auth = Authenticator(self)
-        for config in configs:
-            self.parse(config)
+class AppConfig(StrictConfig):
+    account: AccountConfig
+    mgmt: MgmtConfig = pydantic.Field(default_factory=MgmtConfig)
+    verification: VerificationConfig = pydantic.Field(default_factory=VerificationConfig)
+    storage: dict[str, dict[str, Any]] = pydantic.Field(default_factory=dict)
+    policies: list[PolicyConfig] = pydantic.Field(default_factory=list)
+    logging: dict[str, str] = pydantic.Field(default_factory=dict)
+    setup: SetupConfig = pydantic.Field(default_factory=SetupConfig)
 
     @property
     def keyfile(self) -> Path:
@@ -140,210 +94,285 @@ class Configurator:
     def registration_file(self) -> Path:
         return self.account.dir / "registration.json"
 
-    def parse(self, config: io.TextIOBase) -> None:
-        parsed_config = self.read_data(config)
-        self.parse_setup_config(parsed_config.pop("setup", []))
-        self.parse_logging_config(parsed_config.pop("logging", []))
-        self.account = self.parse_group(AccountConfig, parsed_config.pop("account", []))
-        self.mgmt = self.parse_group(MgmtConfig, parsed_config.pop("mgmt", []))
-        special_group_re = re.compile(
-            '^(?P<type>(auth|verification|storage)) (?P<opener>"?)(?P<name>.+)(?P=opener)$'
-        )
-        auth_blocks: list[tuple[str, list[tuple[str, str]]]] = []
-        for group, options in parsed_config.items():
-            match = special_group_re.match(group)
-            if match:
-                if match.group("type") == "auth":
-                    # parse auth blocks last to have verification and storage blocks processed
-                    auth_blocks.append((match.group("name"), options))
-                elif match.group("type") == "verification":
-                    self.parse_verification_group(match.group("name"), options)
+
+@dataclass(frozen=True)
+class ProviderSpec(Generic[P]):
+    implementation: type[P]
+    config: pydantic.BaseModel
+
+    def build(self, name: str) -> P:
+        return self.implementation(name, self.config)
+
+
+@dataclass(frozen=True)
+class ValidatedConfig:
+    settings: AppConfig
+    providers: dict[str, ProviderSpec["ChallengeImplementor"]]
+    storages: dict[str, ProviderSpec["StorageImplementor"]]
+    methods: tuple[tuple[MethodSpec, ...], ...]
+    routes: tuple[RoutingConfig, ...]
+    default_storage: str | None
+
+
+def legacy_policy(name: str, options: Sequence[tuple[str, str]]) -> dict[str, Any]:
+    """The only place that knows the old flat authentication option names."""
+    values = aggregate(options)
+    result: dict[str, Any] = {"name": name, "auth": {}}
+    for old, new in (
+        ("domain", "domains"),
+        ("verification", "verification"),
+        ("storage", "storage"),
+    ):
+        if old in values:
+            result[new] = values.pop(old)
+    if "domains" in result and isinstance(result["domains"], str):
+        result["domains"] = [result["domains"]]
+    if "ip" in values:
+        ips = values.pop("ip")
+        result["auth"]["ip"] = {"networks": ips if isinstance(ips, list) else [ips]}
+    if "hmac_type" in values or "hmac_key" in values:
+        hmac_settings = {}
+        for old, new in (("hmac_type", "algorithm"), ("hmac_key", "secret")):
+            if old in values:
+                hmac_settings[new] = values.pop(old)
+        result["auth"]["hmac"] = hmac_settings
+    if "all" in values:
+        if values.pop("all") not in ("yes", "true", True):
+            raise ConfigurationError(f'auth "{name}": all must be yes')
+        result["auth"]["all"] = {}
+    if values:
+        # Never include credential values in this error.
+        raise ConfigurationError(f'auth "{name}": unknown options: {", ".join(values)}')
+    return result
+
+
+def read_ini(stream: io.TextIOBase) -> dict[str, Any]:
+    sections: dict[str, list[tuple[str, str]]] = {}
+    current: list[tuple[str, str]] | None = None
+    for number, raw in enumerate(stream, 1):
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1]
+            if name in sections:
+                raise ConfigurationError(f"Duplicate INI section: {name}")
+            current = sections[name] = []
+        elif current is None:
+            warnings.warn(f"Option without sections: {line}", UnusedOptionWarning, stacklevel=2)
+        elif "=" not in line:
+            raise ConfigurationError(f"Invalid INI option on line {number}")
+        else:
+            key, value = line.split("=", 1)
+            current.append((key.strip(), value.strip()))
+
+    data: dict[str, Any] = {}
+    for section, options in sections.items():
+        if section in ("account", "mgmt", "logging", "setup"):
+            data[section] = aggregate(options)
+            if section == "setup":
+                for key, value in data[section].items():
+                    if isinstance(value, str):
+                        data[section][key] = [value]
+            continue
+        match = re.fullmatch(r'(auth|verification|storage) (?:"([^"]+)"|([^"].*))', section)
+        if not match:
+            warnings.warn(f"Unknown section name: {section}", UnusedSectionWarning, stacklevel=2)
+            continue
+        kind, quoted, plain = match.groups()
+        name = quoted or plain
+        if kind == "auth":
+            data.setdefault("policies", []).append(legacy_policy(name, options))
+        elif kind == "verification":
+            data.setdefault("verification", {}).setdefault("providers", {})[name] = aggregate(
+                options
+            )
+        else:
+            data.setdefault("storage", {})[name] = aggregate(options)
+    return data
+
+
+def normalize(data: dict[str, Any]) -> dict[str, Any]:
+    """Expand the short provider form to the same shape used by advanced configs."""
+    verification = data.get("verification")
+    if isinstance(verification, dict) and "type" in verification:
+        if {"providers", "rules", "default"} & verification.keys():
+            raise ConfigurationError("Inline verification cannot also define providers or rules")
+        data["verification"] = {"default": "default", "providers": {"default": verification}}
+    return data
+
+
+def merge(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key, value in source.items():
+        if key == "policies":
+            target.setdefault(key, []).extend(value)
+        elif key == "verification":
+            routing = target.setdefault(key, {})
+            for option, setting in value.items():
+                if option == "providers":
+                    routing.setdefault(option, {}).update(setting)
                 else:
-                    self.parse_storage_group(match.group("name"), options)
-            else:
-                warnings.warn(
-                    "Unknown section name: {0}".format(group), UnusedSectionWarning, stacklevel=2
+                    routing[option] = setting
+        elif key in ("account", "mgmt", "storage", "logging", "setup"):
+            target.setdefault(key, {}).update(value)
+        else:
+            target[key] = value
+
+
+def load_config(
+    *sources: Path | str | io.TextIOBase,
+    registry: AuthenticationRegistry = auth_methods,
+) -> ValidatedConfig:
+    data: dict[str, Any] = {}
+    for source in sources:
+        if isinstance(source, (str, Path)):
+            with open(source, encoding="utf-8") as stream:
+                part = (
+                    tomllib.loads(stream.read())
+                    if Path(source).suffix.lower() == ".toml"
+                    else read_ini(stream)
                 )
+        else:
+            name = getattr(source, "name", "")
+            part = (
+                tomllib.loads(source.read())
+                if str(name).lower().endswith(".toml")
+                else read_ini(source)
+            )
+        merge(data, normalize(part))
+    return validate_config(data, registry=registry)
 
-        self.setup_default_validator()
-        self.setup_default_storage()
 
-        for name, options in auth_blocks:
-            self.auth.parse_block(name, options)
-
-    @staticmethod
-    def parse_group(model: type[T], options: Sequence[tuple[str, Any]]) -> T:
-        aggregated: dict[str, list[Any] | Any] = {}
-        for key, value in options:
-            if key in aggregated:
-                if not isinstance(aggregated[key], list):
-                    aggregated[key] = [aggregated[key]]
-                aggregated[key].append(value)
-            elif not value.strip():
-                aggregated[key] = False
-            else:
-                aggregated[key] = value
-        parsed = model.model_validate(aggregated)
-        if parsed.model_extra:
+def validate_config(
+    data: Mapping[str, Any], *, registry: AuthenticationRegistry = auth_methods
+) -> ValidatedConfig:
+    settings = AppConfig.model_validate(normalize(dict(data)))
+    # Keep legacy warnings for non-auth options; authentication models are strict.
+    for model in (settings.account, settings.mgmt):
+        if model.model_extra:
             warnings.warn(
-                f"{model.__name__}: Ignore extra options {parsed.model_extra}",
+                f"{type(model).__name__}: Ignore extra options {model.model_extra}",
                 UnusedOptionWarning,
                 stacklevel=2,
             )
-        return parsed
+    from .challenges import implementors as challenge_types
+    from .storages import implementors as storage_types
 
-    @staticmethod
-    def read_data(config: io.TextIOBase) -> dict[str, list[tuple[str, str]]]:
-        """Reads the given file name. It assumes that the file has a INI file
-        syntax. The parser returns the data without comments and fill
-        characters. It supports multiple option with the same name per
-        section but not multiple sections with the same name."""
-        sections: dict[str, list[tuple[str, str]]] = {}
-        with config as f:
-            section: str | None = None
-            options: list[tuple[str, str]] = []
-            for line in f:
-                line = line.strip()
-                # ignore comments:
-                if line.startswith(("#", ";")):
-                    continue
-                if not line:
-                    continue
-                # handle section header:
-                if line.startswith("[") and line.endswith("]"):
-                    if section:  # save old section data
-                        sections[section] = options
-                    section = line[1:-1]
-                    options = []
-                    continue
-                if section is None:
-                    warnings.warn(
-                        "Option without sections: {0}".format(line),
-                        UnusedOptionWarning,
-                        stacklevel=2,
-                    )
-                    continue
-                option, value = line.split("=", 1)
-                options.append((option.strip(), value.strip()))
-            if section:  # save old section data
-                sections[section] = options
-        return sections
-
-    def parse_setup_config(self, config: list[tuple[str, str]]) -> None:
-        for option, value in config:
-            if option == "include-path":
-                sys.argv.insert(0, value)
-            elif option == "plugin":
-                importlib.import_module(value)
-            else:
-                warnings.warn(
-                    "Option unknown [{}]{} = {}".format("setup", option, value),
-                    UnusedOptionWarning,
-                    stacklevel=2,
-                )
-
-    def parse_logging_config(self, config: list[tuple[str, str]]) -> None:
-        level = None
-        destination = None
-        format = None
-        config_file = None
-        for option, value in config:
-            if option == "level":
-                level = value.upper()
-            elif option == "destination":
-                destination = value
-            elif option == "format":
-                format = value
-            elif option == "config-file":
-                config_file = value
-            else:
-                warnings.warn(
-                    "Option unknown [{}]{} = {}".format("logging", option, value),
-                    UnusedOptionWarning,
-                    stacklevel=2,
-                )
-        if config_file:
-            if level or destination:
-                warnings.warn(
-                    "logging: external config will be used - other logging settings like level and destination will be ignored",
-                    UnusedOptionWarning,
-                    stacklevel=2,
-                )
-            logging.config.fileConfig(config_file)
+    providers = dict(settings.verification.providers)
+    default = settings.verification.default
+    if default is None:
+        default = settings.mgmt.default_verification
+    if default is None:
+        if len(providers) == 1:
+            default = next(iter(providers))
         else:
-            opts: dict[str, Any] = {}
-            if destination == "syslog":
-                opts = {"handlers": [logging.handlers.SysLogHandler("/dev/log")]}
-            elif destination == "stdout":
-                opts = {"handlers": [logging.StreamHandler(sys.stdout)]}
-            elif destination == "stderr":
-                opts = {"handlers": [logging.StreamHandler(sys.stderr)]}
-            elif destination == "journalctl":
-                try:
-                    import systemd.journal  # type: ignore  # noqa: PGH003
-                except ImportError:
-                    raise ConfigurationError(
-                        "systemd python module required to log to journalctl"
-                    ) from None
-                opts = {"handlers": [systemd.journal.JournalHandler()]}  # type: ignore  # noqa: PGH003
-            elif destination:  # normal file:
-                opts = {"filename": destination}
-            else:  # reuse loggings default destination (stderr)
-                opts = {}
-            if format:
-                opts["format"] = format
-            logging.basicConfig(level=level or "WARNING", **opts)
+            default = "http" if "http" not in providers else "__default_http__"
+            providers[default] = {"type": "http01"}
+    settings.verification.default = default
+    settings.verification.providers = providers
 
-    def parse_verification_group(self, name: str, options: list[tuple[str, str]]) -> None:
-        option, value = options.pop(0)
-        if option != "type":
-            raise ConfigurationError("A verification must start with the type value!")
-        from .challenges import setup
-
-        self.validators[name] = setup(value, name, options)
-
-    def setup_default_validator(self) -> None:
-        if self.mgmt.default_verification is False:  # default validator disabled
-            self.default_validator = None
-            return
-        if self.mgmt.default_verification:  # defined
-            self.default_validator = self.validators[self.mgmt.default_verification]
-            return
-        if len(self.validators) == 1:  # we use the only defined validator as default
-            self.default_validator = next(iter(self.validators.values()))
-        else:  # define a default http storage
-            from .challenges import setup
-
-            self.default_validator = self.validators["http"] = setup("http01", "http", [])
-
-    def parse_storage_group(self, name: str, options: list[tuple[str, str]]) -> None:
-        option, value = options.pop(0)
-        if option != "type":
-            raise ConfigurationError("A storage must start with the type value!")
-        from .storages import setup
-
-        self.storages[name] = setup(value, name, options)
-
-    def setup_default_storage(self) -> None:
-        if self.mgmt.default_storage is False:  # default storage disabled
-            self.default_storage = None
-            return
-        if self.mgmt.default_storage:
-            self.default_storage = self.storages[self.mgmt.default_storage]
-        if len(self.storages) == 1:
-            self.default_storage = next(iter(self.storages.values()))
+    storages = dict(settings.storage)
+    storage_default = settings.mgmt.default_storage
+    if storage_default is None:
+        if len(storages) == 1:
+            storage_default = next(iter(storages))
         else:
-            from .storages import setup
+            storage_default = "none" if "none" not in storages else "__default_none__"
+            storages[storage_default] = {"type": "none"}
+    settings.storage = storages
+    if storage_default is not False and storage_default not in storages:
+        raise UnknownStorageError(f"Storage {storage_default!r} undefined")
 
-            self.default_storage = self.storages["none"] = setup("none", "none", [])
+    def specs(
+        definitions: dict[str, dict[str, Any]], implementations: Mapping[str, type[P]]
+    ) -> dict[str, ProviderSpec[P]]:
+        result = {}
+        for name, raw in definitions.items():
+            options = dict(raw)
+            kind = options.pop("type", None)
+            if not isinstance(kind, str) or kind not in implementations:
+                raise ConfigurationError(f"Unknown provider type {kind!r} for {name!r}")
+            implementation = implementations[kind]
+            result[name] = ProviderSpec(implementation, parse_group(implementation.Config, options))
+        return result
+
+    def check_route(route: RoutingConfig) -> None:
+        references = [r.provider for r in route.rules]
+        if isinstance(route.default, str):
+            references.append(route.default)
+        for name in references:
+            if name not in providers:
+                raise UnknownVerificationError(f"Validator {name!r} undefined")
+
+    check_route(settings.verification)
+    methods = []
+    routes = []
+    for policy in settings.policies:
+        methods.append(
+            tuple(registry.validate(kind, options) for kind, options in policy.auth.items())
+        )
+        route = policy.verification
+        if route is None:
+            route = RoutingConfig(default=default, rules=settings.verification.rules)
+        elif isinstance(route, str):
+            route = RoutingConfig(default=route)
+        check_route(route)
+        if not route.default and not route.rules:
+            raise UnknownVerificationError(
+                f'auth "{policy.name}" does not define a validator and the default one is disabled'
+            )
+        routes.append(route)
+        storage = policy.storage if policy.storage is not None else storage_default
+        if not storage or storage not in storages:
+            raise UnknownStorageError(
+                f'auth "{policy.name}": storage {storage!r} undefined or default one is disabled'
+            )
+    return ValidatedConfig(
+        settings,
+        specs(providers, challenge_types),
+        specs(storages, storage_types),
+        tuple(methods),
+        tuple(routes),
+        storage_default or None,
+    )
 
 
-def iter_addrinfo(listeners: str | list[str]) -> Generator[ListenerInfo, None, None]:
-    if isinstance(listeners, str):
-        listeners = [listeners]
-    for listener in listeners:
-        host, port = listener.rsplit(":", 1)
-        if host[0] == "[" and host[-1] == "]":
-            host = host[1:-1]
-        for info in socket.getaddrinfo(host, int(port), proto=socket.IPPROTO_TCP):
-            yield info
+def load_plugins(*sources: Path | str | io.TextIOBase) -> None:
+    """Explicit startup hook for legacy setup plugins, before model validation.
+
+    Validation itself never imports configured plugins or changes sys.path.
+    """
+    data: dict[str, Any] = {}
+    for source in sources:
+        if not isinstance(source, (str, Path)):
+            raise ConfigurationError("Plugin setup requires configuration file paths")
+        with open(source, encoding="utf-8") as stream:
+            part = (
+                tomllib.loads(stream.read())
+                if Path(source).suffix.lower() == ".toml"
+                else read_ini(stream)
+            )
+        data.update(part.get("setup", {}))
+    setup = SetupConfig.model_validate(data)
+    for path in reversed(setup.include_paths):
+        sys.path.insert(0, path)
+    for plugin in setup.plugins:
+        importlib.import_module(plugin)
+
+
+# Compatibility facade for callers constructing a configured runtime directly.
+# New callers can validate with load_config() before build_components().
+class Configurator(Components):
+    parse_group = staticmethod(parse_group)
+
+    def __init__(self, *sources: Path | str | io.TextIOBase) -> None:
+        validated = load_config(*sources) if sources else validate_config({"account": {"dir": "."}})
+        runtime = build_components(validated)
+        super().__init__(
+            runtime.settings,
+            runtime.validators,
+            runtime.default_validator,
+            runtime.storages,
+            runtime.default_storage,
+            runtime.auth,
+        )

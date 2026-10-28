@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 import logging
 import os.path
@@ -20,7 +21,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 import josepy.jwk
 import josepy.util
 
-from .config import Configurator
+from .challenges import ChallengeRouter
+from .config import AppConfig
 from .exceptions import (
     AccountError,
     ChallengeFailed,
@@ -39,7 +41,7 @@ logger = logging.getLogger(__name__)
 class ACMEManager:
     """ACME manager - high level ACME client; process authorizations automatically."""
 
-    def __init__(self, config: Configurator, connect: bool = True) -> None:
+    def __init__(self, config: AppConfig, connect: bool = True) -> None:
         self.responses: dict[str, dict[str, Any]] = {}
         self.authzrs: dict[str, acme.messages.AuthorizationResource] = {}
         self.config = config
@@ -110,14 +112,14 @@ class ACMEManager:
     @property
     def directory(self) -> acme.messages.Directory:
         return acme.messages.Directory.from_json(
-            acme.client.ClientNetwork(None, verify_ssl=os.getenv("ACME_CAFILE", True))
+            acme.client.ClientNetwork(None, verify_ssl=os.getenv("ACME_CAFILE", True))  # type: ignore[invalid-argument-type] (requests also accepts CA paths)
             .get(self.config.account.acme_server)
             .json()
         )
 
     def init_client(self) -> None:
         """create ACME client"""
-        net = acme.client.ClientNetwork(self.key, verify_ssl=os.getenv("ACME_CAFILE", True))
+        net = acme.client.ClientNetwork(self.key, verify_ssl=os.getenv("ACME_CAFILE", True))  # type: ignore[invalid-argument-type] (requests also accepts CA paths)
         directory = acme.messages.Directory.from_json(
             net.get(self.config.account.acme_server).json()
         )
@@ -128,7 +130,9 @@ class ACMEManager:
         emails: list[str] | None = None,
         tos_agreement: list[str] | bool | str | None = None,
     ) -> None:
-        agreed_tos = tos_agreement or self.config.account.accept_terms_of_service
+        agreed_tos = (
+            self.config.account.accept_terms_of_service if tos_agreement is None else tos_agreement
+        )
         if agreed_tos is True:
             tos_accepted = True
         elif isinstance(agreed_tos, str):
@@ -146,7 +150,10 @@ class ACMEManager:
         try:
             self.registration = self.client.new_account(resource)
         except acme.messages.Error as err:
-            if err.typ == "urn:ietf:params:acme:error:agreementRequired":
+            if err.typ == "urn:ietf:params:acme:error:agreementRequired" or (
+                err.typ == "urn:ietf:params:acme:error:userActionRequired"
+                and "terms of service" in (err.detail or "").lower()
+            ):
                 raise NeedToAgreeToTOS(self.client.directory.meta.terms_of_service) from None
             elif (
                 err.typ == "urn:ietf:params:acme:error:malformed"
@@ -204,7 +211,7 @@ class ACMEManager:
     # ---------------------------------------------------------
 
     def acquire_domain_validations(
-        self, validator: "ChallengeImplementor", csrpem: bytes
+        self, validator: "ChallengeImplementor | ChallengeRouter", csrpem: bytes
     ) -> acme.messages.OrderResource:
         """requests for all given domains domain validations
         If we have cached a valid challenge return this.
@@ -222,20 +229,33 @@ class ACMEManager:
                 logger.warning("New certificate rejected due to rate limiting")
                 raise RateLimited(e.detail) from None
             raise
-        for authz in cast(tuple[acme.messages.AuthorizationResource, ...], order.authorizations):
-            domain = authz.body.identifier.value
-            logger.info("processing authorization for %s", domain)
-            if not validator.new_authorization(authz.body, self.client, self.key, domain):
-                # HTTP01 is not support; no clue what to do ...
-                raise NoChallengeMethodsSupported(
-                    "No supported challenge methods were offered for {}.".format(domain)
+        router = validator if isinstance(validator, ChallengeRouter) else ChallengeRouter(validator)
+        with ExitStack() as resources:
+            for authz in cast(
+                tuple[acme.messages.AuthorizationResource, ...], order.authorizations
+            ):
+                if authz.body.status == acme.messages.STATUS_VALID:
+                    continue
+                domain = authz.body.identifier.value
+                identifier = "*." + domain if authz.body.wildcard else domain
+                provider = router.select(identifier)
+                logger.info("processing authorization for %s using %s", identifier, provider.name)
+                prepared = provider.prepare(authz.body, self.key, domain)
+                if prepared is None:
+                    raise NoChallengeMethodsSupported(
+                        f"Provider {provider.name} cannot validate {identifier} with the offered challenges"
+                    )
+                resources.callback(prepared.cleanup)
+                self.client.answer_challenge(prepared.challenge, prepared.response)
+            logger.info("Awaiting authorizations")
+            try:
+                return self.client.poll_authorizations(
+                    order,
+                    datetime.now() + timedelta(seconds=90),  # noqa: DTZ005 (acme expects a naive deadline)
                 )
-        logger.info("Awaiting for authorization to be validated")
-        try:
-            return self.client.poll_authorizations(order, datetime.now() + timedelta(seconds=90))  # noqa: DTZ005 (acme expects offset-naive datetimes)
-        except acme.errors.ValidationError:
-            logger.error("Authorizations could not be validated!")
-            raise ChallengeFailed() from None
+            except acme.errors.ValidationError:
+                logger.error("Authorizations could not be validated")
+                raise ChallengeFailed() from None
 
     def issue_certificate(self, order: acme.messages.OrderResource) -> str:
         # Request a certificate using the CSR and some number of domain validation challenges.

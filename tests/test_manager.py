@@ -263,3 +263,31 @@ def test_rate_limit_on_certificate_creation(
         assert len(authorizations) == 1
         m.issue_certificate(orderr)
     assert domains[0] in str(e.value)
+
+
+@pytest.mark.parametrize("error_type", ["agreementRequired", "userActionRequired", "malformed"])
+def test_terms_errors_are_translated(error_type: str) -> None:
+    from unittest.mock import Mock
+
+    m = M("[account]\ndir=tests/support/valid")
+    m.load_private_key()
+    m.client = Mock()
+    m.client.directory.meta.terms_of_service = "https://ca.example/terms"
+    m.client.new_account.side_effect = acme.messages.Error(
+        typ="urn:ietf:params:acme:error:" + error_type,
+        detail="must agree to terms of service",
+    )
+    with pytest.raises(exceptions.NeedToAgreeToTOS):
+        m.register(tos_agreement=False)
+
+
+def test_explicit_tos_rejection_overrides_config() -> None:
+    from unittest.mock import Mock
+
+    m = M("[account]\ndir=tests/support/valid\naccept-terms-of-service=yes")
+    m.load_private_key()
+    m.client = Mock()
+    m.dump_registration = Mock()
+    m.register(tos_agreement=False)
+    resource = m.client.new_account.call_args.args[0]
+    assert resource.terms_of_service_agreed is False

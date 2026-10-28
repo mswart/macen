@@ -3,7 +3,7 @@ name = "macen"
 version = "0.5.0"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
-dependencies = ["acme>=0.21.0", "josepy", "IPy", "pydantic>=2.11.7"]
+dependencies = ["acme>=0.21.0", "josepy", "pydantic>=2.11.7", "tomli>=2; python_version < '3.11'"]
 description = "Basic Python Server to execute ACME on behalf of dumb clients"
 readme = "README.md"
 authors = [{ name = "Malte Swart", email = "mswart@devtation.de" }]
@@ -37,7 +37,7 @@ Changelog = "https://github.com/mswart/macen/blob/master/CHANGELOG.rst"
 
 [project.optional-dependencies]
 systemd = ["systemd"]
-dns01 = ["dnslib", "py3dns"]
+dns01 = ["dnslib", "dnspython"]
 
 [project.scripts]
 macen = "macen.__main__:main"
