@@ -4,9 +4,16 @@ import socket
 import socketserver
 from typing import TYPE_CHECKING, Any
 
-from .auth import Authenticator
-from .exceptions import ChallengeFailed, PayloadInvalid, PayloadToLarge, RateLimited
-from .manager import ACMEManager
+from .auth import AuthenticationContext
+from .exceptions import (
+    AuthorizationDenied,
+    ChallengeFailed,
+    NoChallengeMethodsSupported,
+    PayloadInvalid,
+    PayloadToLarge,
+    RateLimited,
+)
+from .issuance import IssuanceService
 
 if TYPE_CHECKING:
     from .challenges import HttpChallengeImplementor
@@ -16,11 +23,15 @@ logger = logging.getLogger(__name__)
 
 class ThreadedACMEServerInet4(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    issuance: IssuanceService
+    max_size: int = 4096
     allow_reuse_address = True
 
 
 class ThreadedACMEServerInet6(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
+    issuance: IssuanceService
+    max_size: int = 4096
     allow_reuse_address = True
     address_family = socket.AF_INET6
 
@@ -29,7 +40,9 @@ class ThreadedACMEServerInet6(socketserver.ThreadingMixIn, http.server.HTTPServe
         http.server.HTTPServer.server_bind(self)
 
 
-ThreadedACMEServerByType: dict[socket.AddressFamily, type[http.server.HTTPServer]] = {
+ThreadedACMEServerByType: dict[
+    socket.AddressFamily, type[ThreadedACMEServerInet4] | type[ThreadedACMEServerInet6]
+] = {
     socket.AF_INET: ThreadedACMEServerInet4,
     socket.AF_INET6: ThreadedACMEServerInet6,
 }
@@ -37,7 +50,6 @@ ThreadedACMEServerByType: dict[socket.AddressFamily, type[http.server.HTTPServer
 
 class ACMEAbstractHandler(http.server.BaseHTTPRequestHandler):
     server_version = "AcmeManager/0.1"
-    manager: ACMEManager
 
     def send_data(
         self, data: bytes | str, content_type: str = "text/plain", response_code: int = 200
@@ -64,8 +76,7 @@ class ACMEHTTPHandler(ACMEAbstractHandler):
     def do_GET(self) -> None:
         """Handles POST request (upload files)."""
         host: str = self.headers["Host"]
-        if host.endswith(":5002"):
-            host = host[:-5]
+        host = host.split(":", 1)[0].lower()
         try:
             self.send_data(self.validator.response_for(host, self.path))
         except KeyError:
@@ -73,9 +84,7 @@ class ACMEHTTPHandler(ACMEAbstractHandler):
 
 
 class ACMEMgmtHandler(ACMEAbstractHandler):
-    @property
-    def auth(self) -> Authenticator:
-        return self.manager.config.auth
+    server: ThreadedACMEServerInet4 | ThreadedACMEServerInet6
 
     def do_POST(self) -> None:
         """Handles POST request (upload files)."""
@@ -90,26 +99,27 @@ class ACMEMgmtHandler(ACMEAbstractHandler):
             self.send_error(404)
             return
         try:
-            with self.auth.process(self.client_address, self.headers, self.rfile) as p:
-                if not p.acceptable():
-                    self.send_error(403)
-                    return
-                logger.info(
-                    "Sign request is valid (CN=%s, DNS=%s)",
-                    p.common_name,
-                    ", ".join(p.dns_names),
-                    extra=extra,
-                )
-                cached_certs = p.storage.from_cache(p.csrpem)
-                if cached_certs:
-                    logger.info("Redeliver already issued certificate", extra=extra)
-                    self.send_data(cached_certs)
-                    return
-                order = self.manager.acquire_domain_validations(p.validator, p.csrpem)
-                certs = self.manager.issue_certificate(order)
-                p.storage.add_to_cache(p.csrpem, certs)
-                logger.info("New certificate issued", extra=extra)
-                self.send_data(certs)
+            # Body limits and framing are transport concerns, never auth plugin work.
+            lengths = self.headers.get_all("Content-Length", [])
+            if len(lengths) != 1 or self.headers.get("Transfer-Encoding") is not None:
+                raise PayloadInvalid()
+            try:
+                length = int(lengths[0])
+            except ValueError:
+                raise PayloadInvalid() from None
+            if length < 0:
+                raise PayloadInvalid()
+            if length > self.server.max_size:
+                raise PayloadToLarge(length, self.server.max_size)
+            body = self.rfile.read(length)
+            if len(body) != length:
+                raise PayloadInvalid()
+            context = AuthenticationContext(self.client_address[0], dict(self.headers), body)
+            certificate = self.server.issuance.sign(context)
+            self.send_data(certificate)
+            logger.info("Certificate delivered", extra=extra)
+        except AuthorizationDenied:
+            self.send_error(403)
         except PayloadToLarge as e:
             logger.warning(
                 "Payload (CSR) to large (%s submitted > %s allowed)", e.size, e.allowed, extra=extra
@@ -118,7 +128,7 @@ class ACMEMgmtHandler(ACMEAbstractHandler):
         except PayloadInvalid:
             logger.warning("Payload (CSR) could not be parsed", extra=extra)
             self.send_error(415)
-        except ChallengeFailed:
+        except (ChallengeFailed, NoChallengeMethodsSupported):
             logger.warning("Unable to validate wanted domains!")
             self.send_error(421, "Misdirected Request: Validation failed")
         except RateLimited:

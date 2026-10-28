@@ -5,7 +5,7 @@ import os
 import os.path
 from pathlib import Path
 import sys
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 import pydantic
 
@@ -19,16 +19,20 @@ else:
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 
-from .config import ConfigurationError, Configurator, default_config
+from .settings import ConfigurationError, default_config, parse_group
 
 
 class StorageImplementor:
     class Config(pydantic.BaseModel):
         model_config = default_config.copy()
 
-    def __init__(self, name: str, options: Sequence[tuple[str, str]]) -> None:
+    def __init__(
+        self, name: str, options: pydantic.BaseModel | Mapping[str, Any] | Sequence[tuple[str, str]]
+    ) -> None:
         self.name = name
-        self.config = Configurator.parse_group(self.Config, options)
+        self.config = (
+            options if isinstance(options, self.Config) else parse_group(self.Config, options)
+        )
 
     @abstractmethod
     def parse(self, options: Sequence[tuple[str, str]]) -> None: ...
