@@ -7,6 +7,12 @@ This page lists all versions with its changes. Macen follows Semantic Versioning
 Version 0
 -------------------------
 
+v0.5.1 (2025-10-08)
+^^^^^^^^^^^^^^^^^^^
+
+Declare support with Python 3.14 and test with it.
+
+
 v0.5.0 (2025-09-11)
 ^^^^^^^^^^^^^^^^^^^
 
