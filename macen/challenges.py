@@ -1,49 +1,86 @@
-from abc import abstractmethod
+"""Challenge selection, providers, and the resources they temporarily publish."""
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from fnmatch import fnmatchcase
+from functools import partial
 import http.server
 import json
 import os
-import socket
-from threading import Event, Thread
-from typing import Any, Literal, Sequence, cast, overload
+from threading import Event, RLock, Thread
+from typing import Any, cast
 import urllib.request
 
 import acme.challenges
-import acme.client
 import acme.messages
 import josepy.jwk
 import pydantic
 
-from .config import ConfigurationError, Configurator, default_config, iter_addrinfo
+from .exceptions import NoChallengeMethodsSupported
+from .helpers import iter_addrinfo
 from .server import ACMEHTTPHandler, ThreadedACMEServerByType
+from .settings import ConfigurationError, default_config, parse_group
 
-ListenerInfo = tuple[
-    socket.AddressFamily,
-    socket.SocketKind,
-    int,
-    str,
-    tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes],
-]
+
+@dataclass(frozen=True)
+class PreparedChallenge:
+    challenge: acme.messages.ChallengeBody
+    response: acme.challenges.ChallengeResponse
+    cleanup: Callable[[], None]
 
 
 class ChallengeImplementor:
     class Config(pydantic.BaseModel):
         model_config = default_config.copy()
 
-    def __init__(self, name: str, options: Sequence[tuple[str, str]]) -> None:
-        self.name = name
-        self.config = Configurator.parse_group(self.Config, options)
-
-    @abstractmethod
-    def start(self) -> Any: ...  # noqa: ANN401 (depends on implementation)
-
-    @abstractmethod
-    def new_authorization(
+    def __init__(
         self,
-        authz: acme.messages.Authorization,
-        client: acme.client.ClientV2,
-        key: josepy.jwk.JWK,
-        domain: str,
-    ) -> bool: ...
+        name: str,
+        options: pydantic.BaseModel | Mapping[str, Any] | Sequence[tuple[str, str]],
+    ) -> None:
+        self.name = name
+        self.config = (
+            options if isinstance(options, self.Config) else parse_group(self.Config, options)
+        )
+        self._lock = RLock()
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def prepare(
+        self, authz: acme.messages.Authorization, key: josepy.jwk.JWK, domain: str
+    ) -> PreparedChallenge | None:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class ChallengeRoute:
+    provider: "ChallengeImplementor"
+    domains: tuple[str, ...] = ()
+    wildcard: bool | None = None
+
+    def matches(self, identifier: str) -> bool:
+        return (self.wildcard is None or identifier.startswith("*.") == self.wildcard) and (
+            not self.domains
+            or any(fnmatchcase(identifier.lower(), pattern.lower()) for pattern in self.domains)
+        )
+
+
+@dataclass(frozen=True)
+class ChallengeRouter:
+    default: "ChallengeImplementor | None"
+    rules: tuple[ChallengeRoute, ...] = ()
+
+    def select(self, identifier: str) -> "ChallengeImplementor":
+        for rule in self.rules:
+            if rule.matches(identifier):
+                return rule.provider
+        if self.default is not None:
+            return self.default
+        raise NoChallengeMethodsSupported(f"No verification route for {identifier}")
 
 
 class HttpChallengeImplementor(ChallengeImplementor):
@@ -53,140 +90,188 @@ class HttpChallengeImplementor(ChallengeImplementor):
         )
 
     config: Config
-    responses: dict[str, dict[str, tuple[str, Event]]]
+
+    def __init__(self, name: str, options: Any) -> None:  # noqa: ANN401
+        super().__init__(name, options)
+        self.responses: dict[str, dict[str, tuple[str, Event]]] = {}
+        self._references: dict[tuple[str, str], int] = {}
+        self._services: list[tuple[http.server.HTTPServer, Thread]] = []
 
     def start(self) -> list[tuple[http.server.HTTPServer, Thread]]:
-        services: list[tuple[http.server.HTTPServer, Thread]] = []
-
-        def bound_handler(*args: Any, **kwargs: Any) -> ACMEHTTPHandler:  # noqa: ANN401 (we just delegate)
+        def bound_handler(*args: Any, **kwargs: Any) -> ACMEHTTPHandler:  # noqa: ANN401
             return ACMEHTTPHandler(self, *args, **kwargs)
 
-        for info in iter_addrinfo(self.config.listeners):
-            http_service = ThreadedACMEServerByType[info[0]](info[4], bound_handler)
-            thread = Thread(
-                target=http_service.serve_forever,
-                daemon=True,
-                name="http service to server validation request",
-            )
-            thread.start()
-            services.append((http_service, thread))
-        self.responses = {}
-        return services
+        try:
+            for info in iter_addrinfo(self.config.listeners):
+                service = ThreadedACMEServerByType[info[0]](info[4], bound_handler)
+                thread = Thread(
+                    target=service.serve_forever, daemon=True, name="macen HTTP challenge"
+                )
+                try:
+                    thread.start()
+                except BaseException:
+                    service.server_close()
+                    raise
+                self._services.append((service, thread))
+        except BaseException:
+            self.stop()
+            raise
+        return self._services
 
-    def new_authorization(
-        self,
-        authz: acme.messages.Authorization,
-        client: acme.client.ClientV2,
-        key: josepy.jwk.JWK,
-        domain: str,
-    ) -> bool:
+    def stop(self) -> None:
+        for service, thread in self._services:
+            service.shutdown()
+            thread.join()
+            service.server_close()
+        self._services.clear()
+
+    def prepare(
+        self, authz: acme.messages.Authorization, key: josepy.jwk.JWK, domain: str
+    ) -> PreparedChallenge | None:
+        if authz.wildcard:
+            return None
         for challenger in cast(tuple[acme.messages.ChallengeBody, ...], authz.challenges):
             challenge = challenger.chall
-            if isinstance(challenge, acme.challenges.HTTP01):
-                # store (and deliver) needed response for challenge
-                content = challenge.validation(key)
-                event = Event()
-                self.responses.setdefault(domain, {})
-                self.responses[domain][challenge.path] = (content, event)
+            if not isinstance(challenge, acme.challenges.HTTP01):
+                continue
+            domain = domain.lower()
+            path = challenge.path
+            with self._lock:
+                self.responses.setdefault(domain, {})[path] = (challenge.validation(key), Event())
+                token = (domain, path)
+                self._references[token] = self._references.get(token, 0) + 1
 
-                # answer challenges / give ACME server go to check challenge
-                resp = challenge.response(key)
-                client.answer_challenge(challenger, resp)
+            return PreparedChallenge(
+                challenger, challenge.response(key), partial(self._release, token)
+            )
+        return None
 
-                return True
-        else:
-            return False
+    def _release(self, token: tuple[str, str]) -> None:
+        with self._lock:
+            self._references[token] -= 1
+            if self._references[token] == 0:
+                del self._references[token]
+                domain, path = token
+                del self.responses[domain][path]
+                if not self.responses[domain]:
+                    del self.responses[domain]
 
     def response_for(self, host: str, path: str) -> str:
-        """request a response for a given request
-
-        :param str host: Hostname of the request
-        :param str path: Requested path (e.g. /.well-known/acme-challenges/?)
-        :raises KeyError: Unknown host or path; return 404
-        """
-        content, event = self.responses[host][path]
-        event.set()
-        return content
+        with self._lock:
+            content, event = self.responses[host][path]
+            event.set()
+            return content
 
 
 class DnsChallengeImplementor(ChallengeImplementor):
-    """WIP"""
+    def __init__(self, name: str, options: Any) -> None:  # noqa: ANN401
+        super().__init__(name, options)
+        self._records: dict[tuple[str, str], int] = {}
 
-    def start(self) -> None:
-        pass
-
-    def new_authorization(
-        self,
-        authz: acme.messages.Authorization,
-        client: acme.client.ClientV2,
-        key: josepy.jwk.JWK,
-        domain: str,
-    ) -> bool:
+    def prepare(
+        self, authz: acme.messages.Authorization, key: josepy.jwk.JWK, domain: str
+    ) -> PreparedChallenge | None:
         for challenger in cast(tuple[acme.messages.ChallengeBody, ...], authz.challenges):
             challenge = challenger.chall
-            if isinstance(challenge, acme.challenges.DNS01):
-                response, validation = challenge.response_and_validation(key)
+            if not isinstance(challenge, acme.challenges.DNS01):
+                continue
+            response, validation = challenge.response_and_validation(key)
+            entry = challenge.validation_domain_name(domain.removeprefix("*.").lower()) + "."
+            token = (entry, validation)
+            with self._lock:
+                if token not in self._records:
+                    try:
+                        self.add_entry(entry, validation)
+                    except Exception:
+                        # An update may have succeeded even if its response was lost.
+                        self.remove_entry(entry, validation)
+                        raise
+                self._records[token] = self._records.get(token, 0) + 1
 
-                self.add_entry(challenge.validation_domain_name(domain) + ".", validation)
+            return PreparedChallenge(challenger, response, partial(self._release, token))
+        return None
 
-                # answer challenges / give ACME server go to check challenge
-                client.answer_challenge(challenger, response)
+    def _release(self, token: tuple[str, str]) -> None:
+        with self._lock:
+            self._records[token] -= 1
+            if self._records[token] == 0:
+                del self._records[token]
+                self.remove_entry(*token)
 
-                return True
-        else:
-            return False
-
-    @abstractmethod
     def add_entry(self, entry: str, value: str) -> None:
-        pass
+        raise NotImplementedError
+
+    def remove_entry(self, entry: str, value: str) -> None:
+        raise NotImplementedError
 
 
 class DnsChallengeServerImplementor(DnsChallengeImplementor):
     class Config(ChallengeImplementor.Config):
         listeners: list[str] | str = pydantic.Field(
-            default_factory=lambda: ["0.0.0.0:1353", "[::1]:1380"]
+            default_factory=lambda: ["0.0.0.0:1353", "[::1]:1353"], alias="listener"
         )
 
     config: Config
-    responses: "dict[tuple[dnslib.DNSLabel, dnslib.CLASS, dnslib.QTYPE], dnslib.DNSRecord]"  # type: ignore  # noqa: F821, PGH003
+
+    def __init__(self, name: str, options: Any) -> None:  # noqa: ANN401
+        super().__init__(name, options)
+        self.responses: dict[str, set[str]] = {}
+        self._servers: list[Any] = []
 
     def start(self) -> None:
-        import dnslib.server  # type: ignore  # noqa: PGH003
+        import dnslib.server
 
-        self.responses = {}
-        for info in iter_addrinfo(self.config.listeners):
-            server = dnslib.server.DNSServer(self, port=info[4][1], address=info[4][0])
-            server.start_thread()
+        try:
+            for info in iter_addrinfo(self.config.listeners):
+                server = dnslib.server.DNSServer(self, port=info[4][1], address=info[4][0])
+                self._servers.append(server)
+                server.start_thread()
+        except BaseException:
+            self.stop()
+            raise
 
-    def resolve(self, request: Any, handler: Any) -> None:  # noqa: ANN401
-        import dnslib  # type: ignore  # noqa: PGH003
+    def stop(self) -> None:
+        for server in self._servers:
+            server.stop()
+            server.server.server_close()
+        self._servers.clear()
+
+    def resolve(self, request: Any, handler: Any) -> Any:  # noqa: ANN401
+        import dnslib
 
         question = request.q
-        lookup = (question.qname, question.qclass, question.qtype)
         reply = request.reply()
-        if lookup in self.responses:
-            reply.add_answer(
-                dnslib.RR(question.qname, question.qtype, rdata=self.responses[lookup], ttl=5)
-            )
-        elif question.qtype == dnslib.QTYPE.A:  # type: ignore  # noqa: PGH003
-            reply.add_answer(
-                dnslib.RR(
-                    question.qname,
-                    question.qtype,
-                    rdata=dnslib.A(os.getenv("FAKE_DNS", "127.0.0.1")),
-                    ttl=5,
+        with self._lock:
+            values = self.responses.get(str(question.qname).lower(), set())
+            if values and question.qtype == dnslib.QTYPE.TXT:
+                for value in sorted(values):
+                    reply.add_answer(
+                        dnslib.RR(question.qname, question.qtype, rdata=dnslib.TXT(value), ttl=5)
+                    )
+            elif question.qtype == dnslib.QTYPE.A:
+                reply.add_answer(
+                    dnslib.RR(
+                        question.qname,
+                        question.qtype,
+                        rdata=dnslib.A(os.getenv("FAKE_DNS", "127.0.0.1")),
+                        ttl=5,
+                    )
                 )
-            )
-        else:
-            reply.header.rcode = dnslib.RCODE.NXDOMAIN  # type: ignore  # noqa: PGH003
+            else:
+                reply.header.rcode = dnslib.RCODE.NXDOMAIN
         return reply
 
     def add_entry(self, entry: str, value: str) -> None:
-        import dnslib  # type: ignore  # noqa: PGH003
+        with self._lock:
+            self.responses.setdefault(entry, set()).add(value)
 
-        self.responses[(dnslib.DNSLabel(entry), dnslib.CLASS.IN, dnslib.QTYPE.TXT)] = dnslib.TXT(  # type: ignore  # noqa: PGH003
-            value
-        )
+    def remove_entry(self, entry: str, value: str) -> None:
+        with self._lock:
+            values = self.responses.get(entry)
+            if values is not None:
+                values.discard(value)
+                if not values:
+                    del self.responses[entry]
 
 
 class DnsChalltestsrvImplementor(DnsChallengeImplementor):
@@ -194,14 +279,29 @@ class DnsChalltestsrvImplementor(DnsChallengeImplementor):
         set_txt_url: str = pydantic.Field(
             default="http://localhost:8055/set-txt", alias="set-txt_url"
         )
+        clear_txt_url: str | None = pydantic.Field(default=None, alias="clear-txt_url")
+        timeout: float = 5
 
     config: Config
 
-    def add_entry(self, entry: str, value: str) -> None:
-        task = json.dumps({"host": entry, "value": value}).encode("utf-8")
+    def _post(self, url: str, data: dict[str, str]) -> None:
+        with urllib.request.urlopen(
+            url, json.dumps(data).encode("utf-8"), timeout=self.config.timeout
+        ) as response:
+            if response.code != 200:
+                raise ValueError("Challenge test server rejected DNS update")
 
-        response = urllib.request.urlopen(self.config.set_txt_url, task)
-        assert response.code == 200
+    def add_entry(self, entry: str, value: str) -> None:
+        self._post(self.config.set_txt_url, {"host": entry, "value": value})
+
+    def remove_entry(self, entry: str, value: str) -> None:
+        # The test server only supports clearing a whole host. Restore all values
+        # still owned by other active authorizations while holding the provider lock.
+        url = self.config.clear_txt_url or self.config.set_txt_url.rsplit("/", 1)[0] + "/clear-txt"
+        self._post(url, {"host": entry})
+        for (host, record), count in self._records.items():
+            if host == entry and count:
+                self.add_entry(host, record)
 
 
 class DnsChallengeDnsUpdateImplementor(DnsChallengeImplementor):
@@ -212,30 +312,28 @@ class DnsChallengeDnsUpdateImplementor(DnsChallengeImplementor):
 
     config: Config
 
-    def add_entry(self, entry: str, value: str) -> None:
-        import dns
+    def _update(self, entry: str, value: str, *, delete: bool) -> None:
         import dns.query
+        import dns.rcode
         import dns.update
 
-        upd = dns.update.Update(
-            self.select_zone(entry),
-            # keyring=dns.tsigkeyring.from_text({keyname: key}),
-            # keyalgorithm=algo)
-        )
-        upd.add(entry, self.config.ttl, "TXT", value)
-        try:
-            response = dns.query.tcp(upd, self.config.dns_server, timeout=self.config.timeout)
-            rcode = response.rcode()
-            if rcode != dns.rcode.NOERROR:
-                rcode_text = dns.rcode.to_text(rcode)
-                raise ValueError(rcode_text)
-            return response
-        except Exception as e:
-            raise ValueError("could not update {}: {}".format(e.__class__.__name__, e)) from None
+        update = dns.update.Update(self.select_zone(entry))
+        if delete:
+            update.delete(entry, "TXT", value)
+        else:
+            update.add(entry, self.config.ttl, "TXT", value)
+        response = dns.query.tcp(update, self.config.dns_server, timeout=self.config.timeout)
+        if response.rcode() != dns.rcode.NOERROR:
+            raise ValueError(f"DNS update failed: {dns.rcode.to_text(response.rcode())}")
+
+    def add_entry(self, entry: str, value: str) -> None:
+        self._update(entry, value, delete=False)
+
+    def remove_entry(self, entry: str, value: str) -> None:
+        self._update(entry, value, delete=True)
 
     def select_zone(self, entry: str) -> str:
-        parts = entry.split(".")
-        return ".".join(parts[-3:])
+        return ".".join(entry.split(".")[-3:])
 
 
 implementors: dict[str, type[ChallengeImplementor]] = {
@@ -246,28 +344,9 @@ implementors: dict[str, type[ChallengeImplementor]] = {
 }
 
 
-@overload
-def setup(
-    type: Literal["http01"], name: str, options: Sequence[tuple[str, str]]
-) -> HttpChallengeImplementor: ...
-@overload
-def setup(
-    type: Literal["dns01-challtestsrv"], name: str, options: Sequence[tuple[str, str]]
-) -> DnsChalltestsrvImplementor: ...
-@overload
-def setup(
-    type: Literal["dns01-server"], name: str, options: Sequence[tuple[str, str]]
-) -> DnsChallengeServerImplementor: ...
-@overload
-def setup(
-    type: Literal["dns01-dnsUpdate"], name: str, options: Sequence[tuple[str, str]]
-) -> DnsChallengeDnsUpdateImplementor: ...
-@overload
-def setup(type: str, name: str, options: Sequence[tuple[str, str]]) -> ChallengeImplementor: ...
-
-
 def setup(type: str, name: str, options: Sequence[tuple[str, str]]) -> ChallengeImplementor:
     try:
-        return implementors[type](name, options)
+        implementation = implementors[type]
     except KeyError:
-        raise ConfigurationError('Unsupported challenge type "{}"'.format(type)) from None
+        raise ConfigurationError(f"Unsupported challenge type {type!r}") from None
+    return implementation(name, options)

@@ -1,307 +1,223 @@
-import hashlib
-import hmac
-import io
-from typing import cast
+"""Authentication and policy regressions, independent of CSR and HTTP plumbing."""
 
-from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPrivateKeyTypes
+from dataclasses import FrozenInstanceError, replace
+import hmac
+from pathlib import Path
+from typing import Any
+
+from pydantic import ValidationError
 import pytest
 
-from macen import auth, challenges, config, storages
-from macen.auth import Authenticator
-from macen.config import Configurator
-from tests.helpers import gencsrpem
+from macen.application import build_components
+from macen.auth import (
+    AllOf,
+    AuthenticationContext,
+    AuthenticationMethod,
+    AuthenticationRegistry,
+    AuthResult,
+    AuthStatus,
+    HmacAuthMethod,
+    Identity,
+    PolicyEvaluator,
+)
+from macen.config import load_config, validate_config
+from macen.settings import ConfigurationError, StrictConfig
 
 
-def args(
-    ckey: CertificateIssuerPrivateKeyTypes,
-    client_ip: str,
-    *domains: str,
-    hmac_type: str | None = None,
-    hmac_key: bytes | None = None,
-    **headers: str,
-) -> tuple[tuple[str, int], dict[str, str], io.BytesIO]:
-    csrpem = gencsrpem(domains, ckey)
-    headers["Content-Length"] = str(len(csrpem))
-    if hmac_key and hmac_type:
-        hash = hmac.new(hmac_key, csrpem, digestmod=getattr(hashlib, hmac_type)).hexdigest()
-        headers["Authentication"] = "hmac name={}, hash={}".format(hmac_type, hash)
-    return ((client_ip, 3405), headers, io.BytesIO(csrpem))
+def evaluator(*policies: dict[str, Any]) -> PolicyEvaluator:
+    return build_components(
+        validate_config({"account": {"dir": "."}, "policies": list(policies)})
+    ).auth
 
 
-@pytest.fixture
-def a(tmpdir_factory: str) -> Authenticator:
-    c = config.Configurator()
-    c.default_validator = challenges.setup("http01", "default", ())
-    c.default_storage = storages.setup("none", "none", ())
-    return c.auth
+def policy(domains: list[str], **methods: dict) -> dict[str, Any]:
+    return {"domains": domains, "auth": methods}
 
 
-def test_reject_for_no_auth_block() -> None:
-    a = auth.Authenticator(cast(Configurator, None))
-    with a.process(("192.0.2.34", 34032), {}, io.BytesIO(b"")) as p:
-        assert p.acceptable() is False
+def context(
+    address: str = "192.0.2.34", *, key: bytes | None = None, algorithm: str = "sha256"
+) -> AuthenticationContext:
+    body = b"the exact request body\r\n"
+    headers = {}
+    if key:
+        digest = hmac.new(key, body, digestmod=algorithm).hexdigest()
+        headers["Authentication"] = f"hmac name={algorithm}, hash={digest}"
+    return AuthenticationContext(address, headers, body)
 
 
-# general
+def test_no_policy_denies() -> None:
+    assert evaluator().authorize(context(), ["example.org"]) is None
 
 
-def test_warning_on_unknown_option(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    with pytest.warns(config.UnusedOptionWarning) as e:
-        a.parse_block("all", [("pi", "192.0.2.34"), ("domain", "*.example.org")])
-    assert 'auth "all"' in str(e[0].message)
-    assert "pi" in str(e[0].message)
-    assert "192.0.2.34" in str(e[0].message)
+@pytest.mark.parametrize(
+    ("domains", "requested", "allowed"),
+    [
+        ([], ["example.org"], False),
+        (["*.org"], ["test.example.org"], True),
+        (["*.example.org"], ["test.example.org", "test.example.com"], False),
+        (["example.org", "*.example.com"], ["example.org", "*.example.com"], True),
+        (["example.org", "www.example.com"], ["example.org", "*.example.com"], False),
+        (["test.example.org", "www.example.com"], ["test.example.org", "www.example.com"], True),
+        (["*"], [], False),
+    ],
+)
+def test_domain_permissions(domains: list[str], requested: list[str], allowed: bool) -> None:
+    auth = evaluator(policy(domains, all={}))
+    assert (auth.authorize(context(), requested) is not None) is allowed
 
 
-def test_error_on_unknown_verification(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    with pytest.raises(config.UnknownVerificationError) as e:
-        a.parse_block("err", [("verification", "asdfasfd"), ("domain", "example.org")])
-    assert "asdfasfd" in str(e.value)
-
-
-def test_error_on_unknown_storage(a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes) -> None:
-    with pytest.raises(config.UnknownStorageError) as e:
-        a.parse_block("err", [("storage", "asdfasfd"), ("domain", "example.org")])
-    assert "asdfasfd" in str(e.value)
-
-
-def test_error_on_no_verification_and_disabled_default_verification(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.config.default_validator = None
-    with pytest.raises(config.UnknownVerificationError) as e:
-        a.parse_block("err", [("domain", "example.org")])
-    assert 'auth "err"' in str(e.value)
-    assert "default" in str(e.value)
-    assert "disabled" in str(e.value)
-
-
-def test_error_on_no_storage_and_disabled_default_one(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.config.default_storage = None
-    with pytest.raises(config.UnknownStorageError) as e:
-        a.parse_block("err", [("domain", "example.org")])
-    assert 'auth "err"' in str(e.value)
-    assert "default" in str(e.value)
-    assert "disabled" in str(e.value)
-
-
-def test_different_validator(a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes) -> None:
-    a.config.validators["bob"] = bob = challenges.setup("dns01-dnsUpdate", "bob", ())
-    a.parse_block("err", [("verification", "bob"), ("domain", "example.org")])
-    assert a.blocks[0].validator is bob
-
-
-def test_different_storage(a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes) -> None:
-    a.config.storages["bob"] = bob = storages.setup("none", "bob", ())
-    a.parse_block("err", [("storage", "bob"), ("domain", "example.org")])
-    assert a.blocks[0].storage is bob
-
-
-# all auth
-
-
-def test_accept_with_all_block_but_no_domains(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block("all", [("all", "yes")])
-    with a.process(*args(ckey, "192.0.2.34", "test.example.org")) as p:
-        assert p.acceptable() is False
-
-
-def test_accept_with_all_block_but_domains(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block("all", [("all", "yes"), ("domain", "*.org")])
-    with a.process(*args(ckey, "192.0.2.34", "test.example.org")) as p:
-        assert p.acceptable() is True
-        assert p.common_name == "test.example.org"
-        assert p.dns_names == ["test.example.org"]
-
-
-## ip auth
-
-
-def test_accept_by_ip_with_correct_domain(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block("all", [("ip", "192.0.2.0/24"), ("domain", "*.example.org")])
-    with a.process(*args(ckey, "192.0.2.34", "test.example.org")) as p:
-        assert p.acceptable() is True
-
-
-def test_accept_by_some_ip_with_correct_domain(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block(
-        "all", [("ip", "198.51.100.0/24"), ("ip", "192.0.2.0/24"), ("domain", "*.example.org")]
+@pytest.mark.parametrize(
+    ("address", "allowed"), [("192.0.2.34", True), ("198.51.100.21", True), ("203.0.113.1", False)]
+)
+def test_ip_authentication(address: str, allowed: bool) -> None:
+    auth = evaluator(
+        policy(["*.example.org"], ip={"networks": ["198.51.100.0/24", "192.0.2.0/24"]})
     )
-    with a.process(*args(ckey, "192.0.2.34", "test.example.org")) as p:
-        assert p.acceptable() is True
+    assert (auth.authorize(context(address), ["test.example.org"]) is not None) is allowed
 
 
-def test_accept_by_ip_reject_by_domain(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block("all", [("ip", "192.0.2.0/24"), ("domain", "*.example.org")])
-    with a.process(*args(ckey, "192.0.2.34", "test.example.com")) as p:
-        assert p.acceptable() is False
+def test_permissions_are_not_combined_across_policies() -> None:
+    auth = evaluator(policy(["*.example.org"], all={}), policy(["*.example.com"], all={}))
+    assert auth.authorize(context(), ["test.example.org", "test.example.com"]) is None
 
 
-def test_accept_by_ip_reject_by_some_domain(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block("all", [("ip", "192.0.2.0/24"), ("domain", "*.example.org")])
-    with a.process(*args(ckey, "192.0.2.34", "www.example.org", "test.example.com")) as p:
-        assert p.acceptable() is False
-
-
-def test_reject_by_ip(a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes) -> None:
-    a.parse_block("all", [("ip", "192.0.2.0/24"), ("domain", "*.example.org")])
-    with a.process(*args(ckey, "198.51.100.21", "test.example.org")) as p:
-        assert p.acceptable() is False
-
-
-def test_reject_multiple_correct_domains_from_different_blocks(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block("all", [("ip", "192.0.2.0/24"), ("domain", "*.example.org")])
-    a.parse_block("all", [("ip", "192.0.2.0/24"), ("domain", "*.example.com")])
-    with a.process(*args(ckey, "192.0.2.34", "test.example.org", "www.example.com")) as p:
-        assert p.acceptable() is False
-
-
-def test_accept_multiple_correct_domains(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block(
-        "all",
-        [("ip", "192.0.2.0/24"), ("domain", "test.example.org"), ("domain", "www.example.com")],
+def test_first_complete_match_wins() -> None:
+    auth = evaluator(
+        {"name": "wrong-ip", **policy(["*"], ip={"networks": ["203.0.113.0/24"]})},
+        {"name": "selected", **policy(["*"], all={})},
+        {"name": "later", **policy(["*"], all={})},
     )
-    with a.process(*args(ckey, "192.0.2.34", "test.example.org", "www.example.com")) as p:
-        assert p.acceptable() is True
+    assert auth.authorize(context(), ["example.org"]).policy.name == "selected"
 
 
-def test_accept_wildcard_domain(a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes) -> None:
-    a.parse_block(
-        "all", [("ip", "192.0.2.0/24"), ("domain", "example.org"), ("domain", "*.example.com")]
-    )
-    with a.process(*args(ckey, "192.0.2.34", "example.org", "*.example.com")) as p:
-        assert p.acceptable() is True
-
-
-def test_reject_wildcard_for_normal_domain(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
+@pytest.mark.parametrize(
+    ("address", "key", "algorithm", "allowed"),
+    [
+        ("192.0.2.34", b"secret", "sha256", True),
+        ("192.0.2.34", None, "sha256", False),
+        ("192.0.2.34", b"wrong", "sha256", False),
+        ("192.0.2.34", b"secret", "sha384", False),
+        ("203.0.113.1", b"secret", "sha256", False),
+    ],
+)
+def test_all_checks_required(
+    address: str, key: bytes | None, algorithm: str, allowed: bool
 ) -> None:
-    a.parse_block(
-        "all", [("ip", "192.0.2.0/24"), ("domain", "example.org"), ("domain", "www.example.com")]
+    auth = evaluator(
+        policy(["*.example.org"], ip={"networks": ["192.0.2.0/24"]}, hmac={"secret": "secret"})
     )
-    with a.process(*args(ckey, "192.0.2.34", "example.org", "*.example.com")) as p:
-        assert p.acceptable() is False
+    assert (
+        auth.authorize(context(address, key=key, algorithm=algorithm), ["test.example.org"])
+        is not None
+    ) is allowed
 
 
-def test_reject2_wildcard_for_normal_domain(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block(
-        "all",
-        [("ip", "192.0.2.0/24"), ("domain", "mail.example.org"), ("domain", "www.example.com")],
+@pytest.mark.parametrize(
+    "header",
+    [
+        "",
+        "hmac",
+        "hmac broken",
+        "hmac name=sha256",
+        "hmac name=sha256, hash=é",
+        "hmac name=sha256, hash=bad, hash=bad",
+    ],
+)
+def test_malformed_credentials_rejected(header: str) -> None:
+    method = HmacAuthMethod(HmacAuthMethod.Config.model_validate({"secret": "secret"}))
+    assert (
+        method.authenticate(AuthenticationContext("127.0.0.1", {"Authentication": header})).status
+        is AuthStatus.REJECTED
     )
-    with a.process(*args(ckey, "192.0.2.34", "*.example.com")) as p:
-        assert p.acceptable() is False
 
 
-## hmac auth
+def test_missing_credentials_and_exact_body() -> None:
+    method = HmacAuthMethod(HmacAuthMethod.Config.model_validate({"secret": "secret"}))
+    assert method.authenticate(context()).status is AuthStatus.MISSING
+    signed = context(key=b"secret")
+    assert method.authenticate(signed).successful
+    assert not method.authenticate(replace(signed, body=signed.body.rstrip())).successful
 
 
-def test_accept_by_ip_and_hmac_with_correct_domain(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block(
-        "all",
-        [
-            ("ip", "192.0.2.0/24"),
-            ("hmac_type", "sha256"),
-            ("hmac_key", "n55gzRK2UcGa8PqULwCmoeobbBw6pG"),
-            ("domain", "*.example.org"),
-        ],
-    )
-    with a.process(
-        *args(
-            ckey,
-            "192.0.2.34",
-            "test.example.org",
-            hmac_type="sha256",
-            hmac_key=b"n55gzRK2UcGa8PqULwCmoeobbBw6pG",
+def test_context_is_immutable() -> None:
+    headers = {"Authentication": "original"}
+    evidence = AuthenticationContext("127.0.0.1", headers)
+    headers["Authentication"] = "modified"
+    assert evidence.headers["authentication"] == "original"
+    with pytest.raises(TypeError):
+        evidence.headers["authentication"] = "modified"
+    with pytest.raises(FrozenInstanceError):
+        evidence.body = b"modified"
+
+
+@pytest.mark.parametrize(
+    "methods",
+    [
+        {},
+        {"unknown": {}},
+        {"hmac": {}},
+        {"hmac": {"secret": "secret", "algorithm": "unknown"}},
+        {"ip": {"networks": ["invalid"]}},
+        {"all": {"typo": True}},
+    ],
+)
+def test_bad_auth_config_fails_at_startup(methods: dict) -> None:
+    with pytest.raises((ValidationError, ConfigurationError)):
+        evaluator({"domains": ["*"], "auth": methods})
+
+
+def test_empty_allof_denies() -> None:
+    assert not AllOf(()).authenticate(context()).successful
+
+
+def test_verified_identity_does_not_trust_headers() -> None:
+    auth = evaluator(policy(["example.org"], identity={"issuer": "acme", "subjects": ["client-1"]}))
+    assert (
+        auth.authorize(
+            AuthenticationContext("127.0.0.1", {"identity": "client-1"}), ["example.org"]
         )
-    ) as p:
-        assert p.acceptable() is True
-
-
-def test_reject_by_valid_ip_but_no_hmac_with_correct_domain(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block(
-        "all",
-        [
-            ("ip", "192.0.2.0/24"),
-            ("hmac_type", "sha256"),
-            ("hmac_key", "n55gzRK2UcGa8PqULwCmoeobbBw6pG"),
-            ("domain", "*.example.org"),
-        ],
+        is None
     )
-    with a.process(*args(ckey, "192.0.2.34", "test.example.org")) as p:
-        assert p.acceptable() is False
+    evidence = AuthenticationContext("127.0.0.1", identity=Identity("client-1", "acme"))
+    assert auth.authorize(evidence, ["example.org"]).identity == evidence.identity
 
 
-def test_reject_by_valid_ip_but_hmac_with_wrong_key_with_correct_domain(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block(
-        "all",
-        [
-            ("ip", "192.0.2.0/24"),
-            ("hmac_type", "sha256"),
-            ("hmac_key", "n55gzRK2UcGa8PqULwCmoeobbBw6pG"),
-            ("domain", "*.example.org"),
-        ],
+def test_method_registration_owns_configuration(tmp_path: Path) -> None:
+    class TokenConfig(StrictConfig):
+        token: str
+
+    class TokenMethod(AuthenticationMethod[TokenConfig]):
+        Config = TokenConfig
+
+        def authenticate(self, request: AuthenticationContext) -> AuthResult:
+            return AuthResult(
+                AuthStatus.SUCCESS
+                if request.headers.get("token") == self.config.token
+                else AuthStatus.REJECTED
+            )
+
+    registry = AuthenticationRegistry()
+    registry.register("token", TokenMethod)
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[account]\ndir="."\n[[policies]]\ndomains=["example.org"]\n[policies.auth.token]\ntoken="test"\n'
     )
-    with a.process(
-        *args(
-            ckey,
-            "192.0.2.34",
-            "test.example.org",
-            hmac_type="sha256",
-            hmac_key=b"FM278BKEq0q9IsTxi4SNQBTVbggPWf",
-        )
-    ) as p:
-        assert p.acceptable() is False
+    config = load_config(path, registry=registry)
+    auth = build_components(config).auth
+    assert auth.authorize(AuthenticationContext("127.0.0.1", {"token": "test"}), ["example.org"])
+    assert auth.authorize(context(), ["example.org"]) is None
+    with pytest.raises(ConfigurationError):
+        registry.register("token", TokenMethod)
 
 
-def test_reject_by_valid_ip_but_hmac_with_wrong_type_with_correct_domain(
-    a: Authenticator, ckey: CertificateIssuerPrivateKeyTypes
-) -> None:
-    a.parse_block(
-        "all",
-        [
-            ("ip", "192.0.2.0/24"),
-            ("hmac_type", "sha256"),
-            ("hmac_key", "n55gzRK2UcGa8PqULwCmoeobbBw6pG"),
-            ("domain", "*.example.org"),
-        ],
+def test_method_exception_aborts_policy_fallback() -> None:
+    class Broken:
+        def authenticate(self, request: AuthenticationContext) -> AuthResult:
+            raise RuntimeError("unavailable")
+
+    auth = evaluator(policy(["*"], all={}), policy(["*"], all={}))
+    auth = PolicyEvaluator(
+        [replace(auth.policies[0], requirement=AllOf((Broken(),))), auth.policies[1]]
     )
-    with a.process(
-        *args(
-            ckey,
-            "192.0.2.34",
-            "test.example.org",
-            hmac_type="sha384",
-            hmac_key=b"n55gzRK2UcGa8PqULwCmoeobbBw6pG",
-        )
-    ) as p:
-        assert p.acceptable() is False
+    with pytest.raises(RuntimeError, match="unavailable"):
+        auth.authorize(context(), ["example.org"])

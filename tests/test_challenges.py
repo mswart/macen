@@ -74,3 +74,30 @@ def test_rate_limit_on_certificate_creation_by_dns(
         assert len(authorizations) == 1
         m.issue_certificate(orderr)
     assert domains[0] in str(e.value)
+
+
+def test_mixed_http_dns_and_wildcard_certificate(
+    backend: ACMEBackend,
+    http_server: challenges.HttpChallengeImplementor,
+    dnschalltestsrv_validator: challenges.DnsChalltestsrvImplementor,
+    ckey: CertificateIssuerPrivateKeyTypes,
+) -> None:
+    from cryptography.x509 import load_pem_x509_certificate
+
+    from macen.challenges import ChallengeRoute, ChallengeRouter
+    from tests.helpers import extract_alt_names
+
+    domains = randomize_domains("mixed{}.org", "mail.mixed{}.org", "*.mixed{}.org")
+    router = ChallengeRouter(
+        http_server,
+        (
+            ChallengeRoute(dnschalltestsrv_validator, (domains[1],)),
+            ChallengeRoute(dnschalltestsrv_validator, wildcard=True),
+        ),
+    )
+    m = backend.registered_manager()
+    order = m.acquire_domain_validations(router, gencsrpem(domains, ckey))
+    certificate = load_pem_x509_certificate(m.issue_certificate(order).encode())
+    assert sorted(extract_alt_names(certificate)) == sorted(domains)
+    assert not http_server.responses
+    assert not dnschalltestsrv_validator._records

@@ -65,3 +65,7 @@ class PayloadToLarge(AcmeException):
 
 class PayloadInvalid(AcmeException):
     """The payload is not a valid CSR"""
+
+
+class AuthorizationDenied(AcmeException):
+    """No policy authorizes this request and all its identifiers."""

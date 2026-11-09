@@ -81,7 +81,75 @@ docker run -v ./config:/config -p 1313:1313 ghcr.io/mswart/macen:latest /config/
 
 ## Configuration
 
-The configuration is a basic INI file, with multiple key support. The main parts are the blocks to define the account directory, listen information for the http interfaces and the configuration which client is allowed to request certificates for which domains.
+Macen accepts INI and TOML files. `.toml` paths select TOML; other paths
+use the existing INI syntax. Both formats use the same validation and runtime.
+
+A compact TOML configuration needs only an account directory, a challenge
+provider, and a policy:
+
+```toml
+[account]
+dir = "/var/lib/macen/account"
+accept-terms-of-service = true
+
+[verification]
+type = "http01"
+listener = ["127.0.0.1:1380"]
+
+[[policies]]
+domains = ["example.org", "*.example.org"]
+
+[policies.auth.ip]
+networks = ["192.0.2.0/24"]
+```
+
+The default CA is Let's Encrypt staging. HTTP challenge requests must reach
+the configured challenge listener, as described above. A domain permission
+glob is independent of challenge routing: issuing an actual wildcard
+certificate requires a DNS provider.
+
+See [the minimal example](configs/example.toml) and
+[the mixed HTTP/DNS example](configs/mixed-challenges.toml).
+
+```sh
+macen --check-config configs/example.toml
+macen base.toml site.toml
+```
+
+Files are merged before references are resolved. Later account, management,
+logging, and setup options override earlier options. Named verification providers
+and storages are replaced as whole definitions. Policy lists append in file order;
+verification rules are replaced when a later file supplies `rules`.
+`--check-config` validates settings and references without constructing providers,
+opening listeners, or contacting the CA. Explicitly configured setup plugins are
+imported so their configuration models can be validated.
+
+Authentication methods have their own settings tables. Every method in a policy
+must pass; the first matching policy must permit **all** requested domains.
+Permissions are never combined across policies. Add `[policies.auth.hmac]` with
+`algorithm = "sha256"` and `secret = "..."` to require HMAC as well as IP.
+Explicit unrestricted authentication is `auth = { all = {} }`; empty authentication
+requirements are rejected. Unknown authentication options and malformed settings
+fail startup, including in INI files.
+
+For advanced challenge selection, define `[verification.providers.NAME]`, set
+`verification.default`, and add ordered `[[verification.rules]]` entries with a
+`provider` and a `domains` list and/or `wildcard` boolean. The first matching rule
+wins; otherwise the default provider is used. `wildcard = true` matches actual
+wildcard identifiers such as `*.example.org`, not every subdomain. If both selectors
+are supplied, both must match. `default = false` disables fallback; an unmatched
+identifier then fails issuance. No fallback is attempted after validation fails.
+
+A policy can override global routing with `verification = "provider-name"`, or
+with its own `[policies.verification]` table containing `default` and `rules`.
+It can choose certificate caching with `storage = "name"`; configure named stores
+under `[storage.NAME]` with the same settings as INI. Authentication methods do not
+choose challenge providers or storage.
+
+Existing INI configurations remain supported. Repeated keys become lists, and
+`type` no longer needs to be the first provider option. Legacy auth blocks must
+contain a valid method (`ip`, HMAC, or explicit `all=yes`); typos are errors rather
+than ignored authentication checks. A representative INI configuration follows:
 
 ```ini
 [account]
@@ -101,7 +169,7 @@ dir = /etc/macen/account/
 
 [mgmt]
 # Management interface itself, the clients needs to talk to this
-mgmt=192.0.2.13:1313
+listener=192.0.2.13:1313
 # maximal size for CSR (in bytes)
 max-size = 4k
 # define which verification block is used by default
@@ -111,7 +179,7 @@ default-storage = file
 
 # Define verification blocks
 [verification "http"]
-# the challenge type has to be defined first!
+# Select the challenge provider type.
 type = http01
 # listen for HTTP challenge check requests (e.g. from Nginx)
 listener=192.0.2.80:1380
@@ -119,7 +187,7 @@ listener=198.51.100.80:1380
 listener=[fe80::80%eth0]:1380
 
 [verification "dns"]
-# the challenge type has to be defined first!
+# Select the challenge provider type.
 type = dns01-dnsUpdate
 # which name server needs to be updated now
 dns-server=192.0.2.53

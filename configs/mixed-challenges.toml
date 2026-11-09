@@ -1,0 +1,35 @@
+[account]
+dir = "/var/lib/macen/account"
+accept-terms-of-service = true
+
+[verification]
+default = "web"
+
+[verification.providers.web]
+type = "http01"
+listener = ["127.0.0.1:1380"]
+
+[verification.providers.dns]
+type = "dns01-dnsUpdate"
+dns-server = "192.0.2.53"
+
+# Ordered rules select a provider for each identifier in the certificate.
+[[verification.rules]]
+wildcard = true
+provider = "dns"
+
+[[verification.rules]]
+domains = ["mail.example.org"]
+provider = "dns"
+
+[[policies]]
+name = "local-client"
+domains = ["example.org", "*.example.org"]
+
+[policies.auth.ip]
+networks = ["127.0.0.1/32", "::1/128"]
+
+# Optional: both IP and HMAC must pass when both methods are configured.
+# [policies.auth.hmac]
+# algorithm = "sha256"
+# secret = "replace-with-your-shared-secret"

@@ -1,345 +1,270 @@
-"""
-This modules organize the decision making whether the signing request is
-valid and should be processed or unauthorized and should be rejected.
+"""Authentication methods and domain authorization, independent of HTTP handlers.
 
-The main external interfaced is constructed with the `.Authenticator`:
-it tangles everything together. The `.Processor` implemented the generel
-decision process by iterating through all available authentication blocks
-and invokes every referenced auchentication mothod to execute it
-authentication and autorisation itself.
+A method owns its Config model and authenticate() implementation. Registering
+it is the only integration step; configuration loading uses the model directly.
 """
 
-from fnmatch import fnmatch
-import hashlib
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from enum import Enum
+from fnmatch import fnmatchcase
 import hmac
-from io import BufferedIOBase
-import logging
-from types import TracebackType
-from typing import TYPE_CHECKING, Literal, Protocol, Sequence, cast
-import warnings
+from ipaddress import IPv4Network, IPv6Network, ip_address
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
-from cryptography import x509
-from cryptography.x509.extensions import Extension, SubjectAlternativeName
-from cryptography.x509.oid import ExtensionOID, NameOID
-from IPy import IP
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
-from . import exceptions
+from .settings import ConfigurationError, StrictConfig
 
 if TYPE_CHECKING:
-    from typing import Self
-
-    from .challenges import ChallengeImplementor
-    from .config import Configurator
+    from .challenges import ChallengeRouter
     from .storages import StorageImplementor
 
-logger = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class Identity:
+    """An identity verified by a method or a trusted protocol adapter."""
+
+    subject: str
+    issuer: str
 
 
-class Authenticator:
-    """Cooridantes the authentication. It stores to configuration with all
-    known authentication blocks.
-    """
+@dataclass(frozen=True)
+class AuthenticationContext:
+    peer_address: str
+    headers: Mapping[str, str] = field(default_factory=dict)
+    body: bytes = b""
+    identity: Identity | None = None
 
-    def __init__(self, config: "Configurator") -> None:
-        self.config: "Configurator" = config
-        self.blocks: list[Block] = []
-
-    def parse_block(self, name: str, options: list[tuple[str, str]]) -> None:
-        self.blocks.append(Block(name, options, self.config))
-
-    def process(
-        self,
-        client_address: tuple[str, int],
-        headers: dict[str, str],
-        rfile: BufferedIOBase,
-    ) -> "Processor":
-        """Executes the request authentication by delicating it to the
-        `.Processor`.
-        """
-        return Processor(self, client_address, headers, rfile)
+    def __post_init__(self) -> None:
+        # Copy before wrapping so the caller cannot mutate the evidence later.
+        object.__setattr__(
+            self, "headers", MappingProxyType({k.lower(): v for k, v in self.headers.items()})
+        )
 
 
-class Method(Protocol):
-    @staticmethod
-    def option_names() -> tuple[str, ...]: ...
-
-    def possible(self, processor: "Processor") -> bool: ...
-    def check(self, processor: "Processor") -> bool: ...
-    def parse(self, option: str, value: str) -> None: ...
+class AuthStatus(Enum):
+    SUCCESS = "success"
+    MISSING = "missing"
+    REJECTED = "rejected"
 
 
-class IPAuthMethod:
-    """Autentication by source IP"""
+@dataclass(frozen=True)
+class AuthResult:
+    status: AuthStatus
+    identity: Identity | None = None
 
-    @staticmethod
-    def option_names() -> tuple[str, ...]:
-        return ("ip",)
-
-    def __init__(self, ips: list[IP] | None = None) -> None:
-        self.ips = ips or []
-
-    def parse(self, option: str, value: str) -> None:
-        assert option == "ip"
-        self.ips.append(IP(value))
-
-    def possible(self, processor: "Processor") -> bool:
-        return self.check(processor)
-
-    def check(self, processor: "Processor") -> bool:
-        cip = IP(processor.client_address[0])
-        for ip in self.ips:
-            if cip in ip:
-                return True
-        return False
+    @property
+    def successful(self) -> bool:
+        return self.status is AuthStatus.SUCCESS
 
 
-class HmacAuthMethod:
-    """Authentication by HMAC / secret key"""
-
-    @staticmethod
-    def option_names() -> tuple[str, ...]:
-        return ("hmac_type", "hmac_key")
-
-    def parse(self, option: str, value: str) -> None:
-        if option == "hmac_type":
-            self.name = value
-            self.hmac = getattr(hashlib, self.name)
-        elif option == "hmac_key":
-            self.key = value.encode("utf-8")
-
-    def parse_authentification_header(
-        self, processor: "Processor"
-    ) -> tuple[str | None, dict[str, str]]:
-        if "Authentication" not in processor.headers:
-            return (None, {})
-        else:
-            name, opts = processor.headers["Authentication"].split(" ", 1)
-            opts = {opt.split("=")[0]: opt.split("=", 1)[1] for opt in opts.split(", ")}
-            return name, opts
-
-    def possible(self, processor: "Processor") -> bool:
-        name, opts = self.parse_authentification_header(processor)
-        if name != "hmac":
-            return False
-        if opts.get("name", None) != self.name:
-            return False
-        if "hash" not in opts:
-            return False
-        return True
-
-    def check(self, processor: "Processor") -> bool:
-        _name, opts = self.parse_authentification_header(processor)
-        csrhash = hmac.new(self.key, processor.csrpem, digestmod=self.hmac).hexdigest()
-        if hmac.compare_digest(csrhash, opts["hash"]):
-            return True
-        else:
-            return False
+class Requirement(Protocol):
+    def authenticate(self, request: AuthenticationContext) -> AuthResult: ...
 
 
-class AllAuthMethod:
-    """Allow all authentication"""
+@dataclass(frozen=True)
+class AllOf:
+    methods: tuple[Requirement, ...]
 
-    @staticmethod
-    def option_names() -> tuple[str, ...]:
-        return ("all",)
+    def authenticate(self, request: AuthenticationContext) -> AuthResult:
+        if not self.methods:
+            return AuthResult(AuthStatus.REJECTED)
+        identity = request.identity
+        for method in self.methods:
+            result = method.authenticate(request)
+            if not result.successful:
+                return result
+            if result.identity is not None:
+                if identity is not None and identity != result.identity:
+                    return AuthResult(AuthStatus.REJECTED)
+                identity = result.identity
+        return AuthResult(AuthStatus.SUCCESS, identity)
 
-    def parse(self, option: str, value: str) -> None:
-        assert option == "all"
-        assert value == "yes"
 
-    def possible(self, processor: "Processor") -> Literal[True]:
-        return True
-
-    def check(self, processor: "Processor") -> Literal[True]:
-        return True
-
-
-class Block:
-    """One authentication block - combination of authentications
-    and list of allowed domains
-    """
-
-    validator: "ChallengeImplementor"
+@dataclass(frozen=True)
+class Policy:
+    name: str
+    requirement: Requirement
+    domains: tuple[str, ...]
+    verification: "ChallengeRouter"
     storage: "StorageImplementor"
 
-    def __init__(self, name: str, options: list[tuple[str, str]], config: "Configurator") -> None:
-        self.name = name
-        self.methods: list[Method] = []
-        self.domain_matchers: list[str] = []
-        self.parse(options, config)
-
-    def possible(self, processor: "Processor") -> bool:
-        if not self.domain_matchers:
-            return False
-        for method in self.methods:
-            if not method.possible(processor):
-                logger.debug("block %s excluded by %s", self.name, method.__class__.__name__)
-                return False
-        return True
-
-    def check(self, processor: "Processor") -> bool:
-        for method in self.methods:
-            if not method.check(processor):
-                return False
-        # check matching of domain names
-        for dns_name in processor.dns_names:
-            for matcher in self.domain_matchers:
-                if fnmatch(dns_name, matcher):
-                    break
-            else:
-                return False
-        return True
-
-    def parse(self, options: Sequence[tuple[str, str]], config: "Configurator") -> None:
-        unused_methods: list[type[Method]] = [IPAuthMethod, AllAuthMethod, HmacAuthMethod]
-        validator = config.default_validator
-        storage = config.default_storage
-        for option, value in options:
-            if option == "domain":
-                self.domain_matchers.append(value)
-                continue
-            if option == "verification":
-                try:
-                    validator = config.validators[value.strip()]
-                except KeyError:
-                    from macen.config import UnknownVerificationError
-
-                    raise UnknownVerificationError(
-                        'Validator "{}" undefined'.format(value.strip())
-                    ) from None
-                continue
-            if option == "storage":
-                try:
-                    storage = config.storages[value.strip()]
-                except KeyError:
-                    from macen.config import UnknownStorageError
-
-                    raise UnknownStorageError(
-                        'Storage "{}" undefined'.format(value.strip())
-                    ) from None
-                continue
-            for method in self.methods:
-                if option in method.option_names():
-                    method.parse(option, value)
-                    break
-            else:  # no known method processes this option
-                for method in unused_methods:
-                    if option in method.option_names():
-                        break
-                else:
-                    from macen.config import UnusedOptionWarning
-
-                    warnings.warn(
-                        'Option unknown [auth "{}"]{} = {}'.format(self.name, option, value),
-                        UnusedOptionWarning,
-                        stacklevel=2,
-                    )
-                    break
-                unused_methods.remove(method)
-                self.methods.append(method())
-                self.methods[-1].parse(option, value)
-        if validator is None:
-            from macen.config import UnknownVerificationError
-
-            raise UnknownVerificationError(
-                'auth "{}" does not define a validator and the default one is disabled'.format(
-                    self.name
-                )
-            )
-        else:
-            self.validator = validator
-        if storage is None:
-            from macen.config import UnknownStorageError
-
-            raise UnknownStorageError(
-                'auth "{}" does not define a storage and the default one is disabled'.format(
-                    self.name
-                )
-            )
-        else:
-            self.storage = storage
+    def permits(self, identifiers: Sequence[str]) -> bool:
+        return bool(identifiers) and all(
+            any(fnmatchcase(domain.lower(), pattern.lower()) for pattern in self.domains)
+            for domain in identifiers
+        )
 
 
-class Processor:
-    """Helper object to process a request, check authentication,
-    reads and parse CSR
-    """
+@dataclass(frozen=True)
+class Authorization:
+    policy: Policy
+    identifiers: tuple[str, ...]
+    identity: Identity | None = None
 
-    storage: "StorageImplementor"
-    validator: "ChallengeImplementor"
-    dns_names: list[str]
-    common_name: str | bytes
-    csrpem: bytes
 
-    def __init__(
-        self,
-        auth: Authenticator,
-        client_address: tuple[str, int],
-        headers: dict[str, str],
-        rfile: BufferedIOBase,
-    ) -> None:
-        self.auth = auth
-        self.client_address = client_address
-        self.headers = headers
-        self.rfile = rfile
+class PolicyEvaluator:
+    def __init__(self, policies: Sequence[Policy]) -> None:
+        self.policies = tuple(policies)
 
-    def __enter__(self) -> "Self":
-        return self
+    def authorize(
+        self, request: AuthenticationContext, identifiers: Sequence[str]
+    ) -> Authorization | None:
+        """Authorize identifiers independently of whether a CSR exists yet.
 
-    def __exit__(
-        self,
-        type: type[BaseException] | None,
-        value: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        pass
-
-    def acceptable(self) -> bool:
-        """process the given request parameter for a CSR signing request and
-        decide whether this request is allowed or not.
-
-        :param client_ip str: The source IP of the client (TCP level)
-        :param dict headers: The request header
-        :param callable get_body: function to read in body (CSR)
-        :return bool: whether request should be accepted
+        An implementation exception propagates: it must never trigger fallback
+        to a more permissive policy. No permissions are combined across policies.
         """
-        # 1. precheck
-        possible_blocks: list[Block] = []
-        for block in self.auth.blocks:
-            if block.possible(self):
-                possible_blocks.append(block)
-        if not possible_blocks:
-            return False
-        # 2. process CSR
+        for policy in self.policies:
+            if not policy.permits(identifiers):
+                continue
+            result = policy.requirement.authenticate(request)
+            if result.successful:
+                return Authorization(policy, tuple(identifiers), result.identity)
+        return None
+
+
+C = TypeVar("C", bound=BaseModel)
+
+
+class AuthenticationMethod(Generic[C]):
+    Config: type[C]
+
+    def __init__(self, config: C) -> None:
+        self.config = config
+
+    def authenticate(self, request: AuthenticationContext) -> AuthResult:
+        raise NotImplementedError
+
+
+class IPConfig(StrictConfig):
+    networks: list[IPv4Network | IPv6Network] = Field(min_length=1)
+
+
+class IPAuthMethod(AuthenticationMethod[IPConfig]):
+    Config = IPConfig
+
+    def authenticate(self, request: AuthenticationContext) -> AuthResult:
         try:
-            self.read_and_parse_csr()
+            address = ip_address(request.peer_address)
         except ValueError:
-            raise exceptions.PayloadInvalid() from None
-        self.accepted_block = None
-        # 3. final check
-        for block in possible_blocks:
-            if block.check(self):
-                self.validator = block.validator
-                self.storage = block.storage
-                return True
-        return False
+            return AuthResult(AuthStatus.REJECTED)
+        return AuthResult(
+            AuthStatus.SUCCESS
+            if any(address in network for network in self.config.networks)
+            else AuthStatus.REJECTED
+        )
 
-    def read_and_parse_csr(self) -> None:
-        content_length = int(self.headers["Content-Length"])
-        if self.auth.config and content_length > self.auth.config.mgmt.max_size:
-            raise exceptions.PayloadToLarge(
-                size=content_length, allowed=int(self.auth.config.mgmt.max_size)
-            )
-        self.csrpem = self.rfile.read(content_length)
-        self.csr = x509.load_pem_x509_csr(self.csrpem)
-        self.common_name = self.csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+
+class HmacConfig(StrictConfig):
+    algorithm: str = "sha256"
+    secret: SecretStr = Field(min_length=1)
+
+    @field_validator("algorithm")
+    @classmethod
+    def valid_algorithm(cls, value: str) -> str:
+        # Validate once at startup, including algorithms that cannot be used by HMAC.
         try:
-            extension = cast(
-                Extension[SubjectAlternativeName],
-                self.csr.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME),
-            )
-            self.dns_names = extension.value.get_values_for_type(x509.DNSName)
-        except x509.ExtensionNotFound:
-            self.dns_names = []
-        if self.common_name not in self.dns_names and isinstance(self.common_name, str):
-            self.dns_names.insert(0, self.common_name)
+            hmac.new(b"", digestmod=value)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Unsupported HMAC algorithm") from exc
+        return value
+
+
+class HmacAuthMethod(AuthenticationMethod[HmacConfig]):
+    Config = HmacConfig
+
+    def authenticate(self, request: AuthenticationContext) -> AuthResult:
+        header = request.headers.get("authentication")
+        if header is None:
+            return AuthResult(AuthStatus.MISSING)
+        try:
+            scheme, parameters = header.split(None, 1)
+            if scheme != "hmac":
+                return AuthResult(AuthStatus.REJECTED)
+            fields: dict[str, str] = {}
+            for item in parameters.split(","):
+                key, value = item.strip().split("=", 1)
+                if key in fields:
+                    return AuthResult(AuthStatus.REJECTED)
+                fields[key] = value
+            if fields.keys() != {"name", "hash"} or fields["name"] != self.config.algorithm:
+                return AuthResult(AuthStatus.REJECTED)
+            digest = hmac.new(
+                self.config.secret.get_secret_value().encode("utf-8"),
+                request.body,
+                digestmod=self.config.algorithm,
+            ).hexdigest()
+            valid = hmac.compare_digest(digest, fields["hash"])
+        except (ValueError, TypeError):
+            return AuthResult(AuthStatus.REJECTED)
+        return AuthResult(AuthStatus.SUCCESS if valid else AuthStatus.REJECTED)
+
+
+class AllConfig(StrictConfig):
+    # The method itself must be explicitly named in the configuration.
+    pass
+
+
+class AllAuthMethod(AuthenticationMethod[AllConfig]):
+    Config = AllConfig
+
+    def authenticate(self, request: AuthenticationContext) -> AuthResult:
+        return AuthResult(AuthStatus.SUCCESS)
+
+
+class IdentityConfig(StrictConfig):
+    issuer: str
+    subjects: list[str] = Field(min_length=1)
+
+
+class IdentityAuthMethod(AuthenticationMethod[IdentityConfig]):
+    """Match a verified adapter identity; never trusts identity HTTP headers."""
+
+    Config = IdentityConfig
+
+    def authenticate(self, request: AuthenticationContext) -> AuthResult:
+        identity = request.identity
+        if identity is None:
+            return AuthResult(AuthStatus.MISSING)
+        if identity.issuer != self.config.issuer or identity.subject not in self.config.subjects:
+            return AuthResult(AuthStatus.REJECTED)
+        return AuthResult(AuthStatus.SUCCESS, identity)
+
+
+@dataclass(frozen=True)
+class MethodSpec:
+    implementation: type[AuthenticationMethod]
+    config: BaseModel
+
+    def build(self) -> AuthenticationMethod:
+        return self.implementation(self.config)
+
+
+class AuthenticationRegistry:
+    def __init__(self) -> None:
+        self._methods: dict[str, type[AuthenticationMethod]] = {}
+
+    def register(self, name: str, implementation: type[AuthenticationMethod]) -> None:
+        if name in self._methods:
+            raise ConfigurationError(f"Authentication method already registered: {name}")
+        self._methods[name] = implementation
+
+    def validate(self, name: str, values: Mapping[str, Any]) -> MethodSpec:
+        try:
+            implementation = self._methods[name]
+        except KeyError:
+            raise ConfigurationError(f"Unknown authentication method: {name}") from None
+        return MethodSpec(implementation, implementation.Config.model_validate(values))
+
+
+auth_methods = AuthenticationRegistry()
+for _name, _implementation in (
+    ("ip", IPAuthMethod),
+    ("hmac", HmacAuthMethod),
+    ("all", AllAuthMethod),
+    ("identity", IdentityAuthMethod),
+):
+    auth_methods.register(_name, _implementation)

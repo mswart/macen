@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta
 import io
 import random
@@ -22,7 +23,8 @@ from cryptography.x509.extensions import Extension, SubjectAlternativeName
 from cryptography.x509.oid import ExtensionOID, NameOID
 
 from macen import config, manager
-from macen.challenges import ChallengeImplementor
+from macen.auth import PolicyEvaluator
+from macen.challenges import ChallengeImplementor, ChallengeRouter
 
 
 def M(
@@ -31,8 +33,9 @@ def M(
     c = config.Configurator(io.StringIO(configcontent))
     if validator:
         c.default_validator = validator
-        for block in c.auth.blocks:
-            block.validator = validator
+        c.auth = PolicyEvaluator(
+            [replace(policy, verification=ChallengeRouter(validator)) for policy in c.auth.policies]
+        )
     return manager.ACMEManager(c, connect=connect)
 
 
