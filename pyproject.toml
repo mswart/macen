@@ -1,7 +1,7 @@
 [project]
 name = "macen"
 version = "0.5.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
 dependencies = ["acme>=0.21.0", "josepy", "IPy", "pydantic>=2.11.7"]
 description = "Basic Python Server to execute ACME on behalf of dumb clients"
@@ -23,7 +23,6 @@ classifiers = [
   # that you indicate whether you support Python 2, Python 3 or both.
   'Programming Language :: Python :: 3 :: Only',
   'Programming Language :: Python :: 3',
-  'Programming Language :: Python :: 3.10',
   'Programming Language :: Python :: 3.11',
   'Programming Language :: Python :: 3.12',
   'Programming Language :: Python :: 3.13',
