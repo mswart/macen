@@ -1,77 +1,60 @@
 #!/usr/bin/env python3
 import argparse
 import importlib.metadata
-from threading import Thread
+from pathlib import Path
+import signal
+from types import FrameType
 
-from .config import Configurator, iter_addrinfo
-from .manager import ACMEManager
-from .server import ACMEAbstractHandler, ACMEMgmtHandler, ThreadedACMEServerByType
+from .application import Application, build_components
+from .config import load_config, load_plugins
+from .helpers import configure_logging
+
+
+def notify(message: str) -> None:
+    try:
+        import systemd.daemon  # type: ignore[unresolved-import]
+    except ImportError:
+        return
+    systemd.daemon.notify(message)
+
+
+def request_shutdown(signum: int, frame: FrameType | None) -> None:
+    raise KeyboardInterrupt
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Basic Python Server to execute ACME instead of dump clients"
+    parser = argparse.ArgumentParser(description="ACME issuance on behalf of simple clients")
+    parser.add_argument(
+        "configs", type=Path, nargs="+", metavar="CONFIG", help="INI or TOML configuration paths"
     )
     parser.add_argument(
-        "configs",
-        type=argparse.FileType("r"),
-        nargs="+",
-        metavar="CONFIG",
-        help="file path to configuration file",
+        "--check-config",
+        action="store_true",
+        help="validate configuration without starting listeners or contacting the CA",
     )
     parser.add_argument(
-        "--version",
-        action="version",
-        version="%(prog)s " + importlib.metadata.version("macen"),
+        "--version", action="version", version="%(prog)s " + importlib.metadata.version("macen")
     )
-
     args = parser.parse_args()
 
-    config = Configurator(*args.configs)
-
-    print("load account and init acme client ... ", end="", flush=True)
-    ACMEAbstractHandler.manager = ACMEManager(config)
-    print("done")
-
-    for validator in config.validators.values():
-        validator.start()
-
-    mgmt_services: list[Thread] = []
-    mgmt_threads: list[Thread] = []
-
-    for mgmt_listen in iter_addrinfo(config.mgmt.listeners):
-        mgmt_service = ThreadedACMEServerByType[mgmt_listen[0]](mgmt_listen[4], ACMEMgmtHandler)
-        mgmt_services.append(mgmt_service)
-        thread = Thread(
-            target=mgmt_service.serve_forever, name="http service to server validation request"
-        )
-        mgmt_threads.append(thread)
-        thread.start()
-
-    print("running")
-
+    load_plugins(*args.configs)
+    config = load_config(*args.configs)
+    if args.check_config:
+        print("Configuration valid")
+        return
+    configure_logging(list(config.settings.logging.items()))
+    app = Application(build_components(config))
+    previous = signal.signal(signal.SIGTERM, request_shutdown)
     try:
-        import systemd.daemon
-
-        systemd.daemon.notify("READY=1")
-    except ImportError:
-        pass  # systemd integration is optional
-
-    finished = 0
-    try:
-        for thread, service in zip(list(mgmt_threads), list(mgmt_services), strict=True):
-            thread.join()
-            service.shutdown()
-            finished += 1
+        app.start()
+        notify("READY=1")
+        app.wait()
     except KeyboardInterrupt:
-        try:
-            import systemd.daemon
-
-            systemd.daemon.notify("STOPPING=1")
-        except ImportError:
-            pass  # systemd integration is optional
-        for mgmt_service in mgmt_services[finished:]:
-            mgmt_service.shutdown()
+        pass
+    finally:
+        notify("STOPPING=1")
+        app.close()
+        signal.signal(signal.SIGTERM, previous)
 
 
 if __name__ == "__main__":

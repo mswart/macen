@@ -9,6 +9,8 @@ from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPri
 import pytest
 
 from macen import challenges, server
+from macen.issuance import IssuanceService
+from macen.manager import ACMEManager
 from tests.helpers import MA, M
 
 
@@ -43,9 +45,8 @@ class ACMEBackend:
 
     def registered_manager(
         self, validator: challenges.ChallengeImplementor | None = None
-    ) -> server.ACMEManager:
+    ) -> ACMEManager:
         manager = MA(self.registered_account, validator=validator)
-        server.ACMEAbstractHandler.manager = manager
         return manager
 
     def set_default_ipv4(self) -> None:
@@ -99,14 +100,8 @@ def http_server(request: pytest.FixtureRequest) -> challenges.HttpChallengeImple
     validator = challenges.setup(
         "http01", "http", [("listener", os.getenv("FAKE_DNS", "127.0.0.1") + ":5002")]
     )
-    services = validator.start()
-
-    def fin() -> None:
-        for service, thread in services:
-            service.shutdown()
-            thread.join()
-
-    request.addfinalizer(fin)
+    validator.start()
+    request.addfinalizer(validator.stop)
     return validator
 
 
@@ -128,12 +123,20 @@ def dnslib_validator() -> challenges.DnsChallengeServerImplementor:
     return validator
 
 
-MgmtServer = server.ThreadedACMEServerInet4
+class MgmtServer(server.ThreadedACMEServerInet4):
+    @property
+    def manager(self) -> ACMEManager:
+        return self.issuance.issuer
+
+    @manager.setter
+    def manager(self, manager: ACMEManager) -> None:
+        self.issuance = IssuanceService(manager.config.auth, manager)
+        self.max_size = int(manager.config.mgmt.max_size)
 
 
 @pytest.fixture(scope="session")
 def mgmt_server(request: pytest.FixtureRequest) -> MgmtServer:
-    mgmt_service = server.ThreadedACMEServerInet4(("127.0.0.1", 0), server.ACMEMgmtHandler)
+    mgmt_service = MgmtServer(("127.0.0.1", 0), server.ACMEMgmtHandler)
     thread = Thread(
         target=mgmt_service.serve_forever,
         daemon=True,
@@ -144,6 +147,7 @@ def mgmt_server(request: pytest.FixtureRequest) -> MgmtServer:
     def fin() -> None:
         mgmt_service.shutdown()
         thread.join()
+        mgmt_service.server_close()
 
     request.addfinalizer(fin)
     return mgmt_service

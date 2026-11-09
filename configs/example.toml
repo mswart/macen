@@ -1,0 +1,15 @@
+# Minimal policy and a single challenge provider for all names.
+[account]
+dir = "/var/lib/macen/account"
+accept-terms-of-service = true
+# The default CA is Let's Encrypt staging. Switch after testing your setup.
+
+[verification]
+type = "http01"
+listener = ["127.0.0.1:1380"]
+
+[[policies]]
+domains = ["example.org", "*.example.org"]
+
+[policies.auth.ip]
+networks = ["127.0.0.1/32", "::1/128"]

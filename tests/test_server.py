@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPri
 from cryptography.x509 import load_pem_x509_certificate
 import pytest
 
-from macen import challenges, server
+from macen import challenges
 from tests.conftest import ACMEBackend, MgmtServer
 from tests.helpers import MA, M, extract_alt_names, gencsrpem, randomize_domains
 
@@ -37,17 +37,12 @@ open127001 = urllib.request.build_opener(BindingHTTPHandler(("127.0.0.1", 0)))
 
 
 def test_for_404_for_unknown_requests(http_server: challenges.HttpChallengeImplementor) -> None:
-    server.ACMEAbstractHandler.manager = M(
-        """[account]
-        dir = tests/support/valid/
-        [mgmt]""",
-        connect=False,
-    )
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen(
             "http://{}:5002/file_not_found".format(os.getenv("FAKE_DNS", "127.0.0.1"))
         )
     assert e.value.code == 404
+    e.value.close()
 
 
 #### mgmt server
@@ -56,7 +51,7 @@ def test_for_404_for_unknown_requests(http_server: challenges.HttpChallengeImple
 def test_mgmt_for_404_for_unknown_requests(
     mgmt_server: MgmtServer, ckey: CertificateIssuerPrivateKeyTypes
 ) -> None:
-    server.ACMEAbstractHandler.manager = M(
+    mgmt_server.manager = M(
         """[account]
         dir = tests/support/valid/
         [mgmt]""",
@@ -66,6 +61,7 @@ def test_mgmt_for_404_for_unknown_requests(
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen("http://127.0.0.1:{}/signing".format(mgmt_server.server_port), csr)
     assert e.value.code == 404
+    e.value.close()
 
 
 def test_mgmt_reject_sign_with_wrong_ip(
@@ -73,7 +69,7 @@ def test_mgmt_reject_sign_with_wrong_ip(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    server.ACMEAbstractHandler.manager = M("""
+    mgmt_server.manager = M("""
         [account]
         dir = tests/support/valid
         acme-server = http://127.0.0.1:4001/directory
@@ -86,6 +82,7 @@ def test_mgmt_reject_sign_with_wrong_ip(
     with pytest.raises(urllib.error.HTTPError) as e:
         open127801.open("http://127.0.0.1:{}/sign".format(mgmt_server.server_port), csr)
     assert e.value.code == 403
+    e.value.close()
 
 
 def test_mgmt_reject_correct_ip_but_missing_sign(
@@ -93,7 +90,7 @@ def test_mgmt_reject_correct_ip_but_missing_sign(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    server.ACMEAbstractHandler.manager = M("""
+    mgmt_server.manager = M("""
         [account]
         dir = tests/support/valid
         acme-server = http://127.0.0.1:4001/directory
@@ -108,6 +105,7 @@ def test_mgmt_reject_correct_ip_but_missing_sign(
     with pytest.raises(urllib.error.HTTPError) as e:
         open127001.open("http://127.0.0.1:{}/sign".format(mgmt_server.server_port), csr)
     assert e.value.code == 403
+    e.value.close()
 
 
 def test_mgmt_reject_correct_ip_but_wrong_hmac_key(
@@ -115,7 +113,7 @@ def test_mgmt_reject_correct_ip_but_wrong_hmac_key(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    server.ACMEAbstractHandler.manager = M("""
+    mgmt_server.manager = M("""
         [account]
         dir = tests/support/valid
         acme-server = http://127.0.0.1:4001/directory
@@ -135,6 +133,7 @@ def test_mgmt_reject_correct_ip_but_wrong_hmac_key(
     with pytest.raises(urllib.error.HTTPError) as e:
         open127001.open(request)
     assert e.value.code == 403
+    e.value.close()
 
 
 def test_mgmt_reject_correct_ip_but_wrong_hmac_type(
@@ -142,7 +141,7 @@ def test_mgmt_reject_correct_ip_but_wrong_hmac_type(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    server.ACMEAbstractHandler.manager = M("""
+    mgmt_server.manager = M("""
         [account]
         dir = tests/support/valid
         acme-server = http://127.0.0.1:4001/directory
@@ -162,6 +161,7 @@ def test_mgmt_reject_correct_ip_but_wrong_hmac_type(
     with pytest.raises(urllib.error.HTTPError) as e:
         open127001.open(request)
     assert e.value.code == 403
+    e.value.close()
 
 
 def test_mgmt_reject_too_long_csr(
@@ -170,7 +170,7 @@ def test_mgmt_reject_too_long_csr(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    server.ACMEAbstractHandler.manager = M(
+    mgmt_server.manager = M(
         backend.registered_account
         + """
         max-size = 512
@@ -193,6 +193,7 @@ def test_mgmt_reject_too_long_csr(
     with pytest.raises(urllib.error.HTTPError) as e:
         open127001.open(request)
     assert e.value.code == 413
+    e.value.close()
 
 
 def test_mgmt_reject_invalid_csr(
@@ -201,7 +202,7 @@ def test_mgmt_reject_invalid_csr(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    server.ACMEAbstractHandler.manager = M(
+    mgmt_server.manager = M(
         backend.registered_account
         + """
         [auth "localhost"]
@@ -223,6 +224,7 @@ def test_mgmt_reject_invalid_csr(
     with pytest.raises(urllib.error.HTTPError) as e:
         open127001.open(request)
     assert e.value.code == 415
+    e.value.close()
 
 
 def test_mgmt_complete_multiple_domains(
@@ -231,7 +233,7 @@ def test_mgmt_complete_multiple_domains(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    server.ACMEAbstractHandler.manager = M(
+    mgmt_server.manager = M(
         backend.registered_account
         + """
         [auth "localhost"]
@@ -263,7 +265,7 @@ def test_mgmt_complete_one_domain(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    server.ACMEAbstractHandler.manager = MA(backend.registered_account, validator=http_server)
+    mgmt_server.manager = MA(backend.registered_account, validator=http_server)
     domains = randomize_domains("debug.fullexample{}.org")
     csr = gencsrpem(domains, ckey)
     response = urllib.request.urlopen(
@@ -281,7 +283,7 @@ def test_mgmt_complete_one_domain_by_dns(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    server.ACMEAbstractHandler.manager = M(
+    mgmt_server.manager = M(
         backend.registered_account
         + """
         [verification "challtestsrv"]
@@ -310,7 +312,7 @@ def test_mgmt_complete_wildcard_domain(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    server.ACMEAbstractHandler.manager = M(
+    mgmt_server.manager = M(
         backend.registered_account
         + """
         [verification "challtestsrv"]
@@ -339,10 +341,39 @@ def test_mgmt_for_certificate_error(
     mgmt_server: MgmtServer,
     ckey: CertificateIssuerPrivateKeyTypes,
 ) -> None:
-    backend.registered_manager(validator=http_server)
+    mgmt_server.manager = backend.registered_manager(validator=http_server)
     domains = randomize_domains("error.fullexample{}.org")
     csr = gencsrpem(domains, ckey)
     backend.add_servfail_response(domains[0])
     with pytest.raises(urllib.error.HTTPError) as e:
         urllib.request.urlopen("http://127.0.0.1:{}/sign".format(mgmt_server.server_port), csr)
     assert e.value.code == 421
+    e.value.close()
+
+
+@pytest.mark.parametrize("lengths", [[], ["invalid"], ["-1"], ["1", "1"]])
+def test_malformed_body_framing(mgmt_server: MgmtServer, lengths: list[str]) -> None:
+    mgmt_server.manager = M('[account]\ndir=tests/support/valid\n[auth "all"]\nall=yes\ndomain=*')
+    connection = http.client.HTTPConnection("127.0.0.1", mgmt_server.server_port, timeout=5)
+    try:
+        connection.putrequest("POST", "/sign")
+        for length in lengths:
+            connection.putheader("Content-Length", length)
+        connection.endheaders()
+        assert connection.getresponse().status == 415
+    finally:
+        connection.close()
+
+
+def test_oversized_body_is_rejected_before_read(mgmt_server: MgmtServer) -> None:
+    mgmt_server.manager = M(
+        '[account]\ndir=tests/support/valid\n[mgmt]\nmax-size=10\n[auth "all"]\nall=yes\ndomain=*'
+    )
+    connection = http.client.HTTPConnection("127.0.0.1", mgmt_server.server_port, timeout=5)
+    try:
+        connection.putrequest("POST", "/sign")
+        connection.putheader("Content-Length", "1000000")
+        connection.endheaders()
+        assert connection.getresponse().status == 413
+    finally:
+        connection.close()
