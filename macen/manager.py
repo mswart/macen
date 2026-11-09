@@ -149,6 +149,11 @@ class ACMEManager:
             if err.typ == "urn:ietf:params:acme:error:agreementRequired":
                 raise NeedToAgreeToTOS(self.client.directory.meta.terms_of_service) from None
             elif (
+                err.typ == "urn:ietf:params:acme:error:userActionRequired"
+                and "terms of service" in (err.detail or "").lower()
+            ):
+                raise NeedToAgreeToTOS(self.client.directory.meta.terms_of_service) from None
+            elif (
                 err.typ == "urn:ietf:params:acme:error:malformed"
                 and "must agree to terms of service" in err.detail
             ):
@@ -157,7 +162,7 @@ class ACMEManager:
             raise
         self.dump_registration()
 
-    def tos_agreement_required(self) -> None | Literal[False] | str:
+    def tos_agreement_required(self) -> Literal[False] | str | None:
         if "terms_of_service" not in self.directory.meta:
             return None
         if not hasattr(self, "registration"):

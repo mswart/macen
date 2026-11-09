@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.14-trixie-slim AS builder
 
 # Configure UV:
 ENV UV_COMPILE_BYTECODE=1
@@ -16,7 +16,7 @@ ADD macen/ /app/macen/
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
 
 # Copy build application into fresh image:
-FROM python:3.13-slim-bookworm
+FROM python:3.14-slim-trixie
 COPY --from=builder --chown=app:app /app /app
 
 # Pick up scripts from venv directly
